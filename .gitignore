@@ -1,0 +1,15 @@
+# Ignore all .xml files in the assets folder
+/assets/*.xml
+
+# If you want to ignore the entire assets folder, use this instead:
+# /assets/
+
+# Optionally, if you want to ignore all .drawio.xml files specifically:
+# /assets/*.drawio.xml
+
+# Ignore .ipynb files (Jupyter Notebooks)
+*.ipynb
+
+# Common ignored files
+.DS_Store
+Thumbs.db
