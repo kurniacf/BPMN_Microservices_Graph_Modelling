@@ -131,15 +131,13 @@ def create_node(tx, label, properties):
 
 def create_relationship_with_id(tx, source_id, target_id, rel_type, properties):
     # Check if relationship already exists
-    check_query = """
-    MATCH (a {id: $source_id})-[r]->(b {id: $target_id})
-    WHERE type(r) = $rel_type
-    RETURN r
-    """
+    check_query = (
+        f"MATCH (a {{id: $source_id}})-[r:`{rel_type}`]->(b {{id: $target_id}}) "
+        "RETURN r"
+    )
     existing = tx.run(check_query, 
-                     source_id=source_id, 
-                     target_id=target_id,
-                     rel_type=rel_type).single()
+                      source_id=source_id, 
+                      target_id=target_id).single()
     if existing:
         return existing[0]
     
@@ -148,13 +146,14 @@ def create_relationship_with_id(tx, source_id, target_id, rel_type, properties):
         'XOR_SPLIT': '#FF69B4',
         'XOR_JOIN': '#4169E1',
         'OR_SPLIT': '#FFD700',
-        'OR_JOIN': '#00CED1'
+        'OR_JOIN': '#00CED1',
+        'USES': '#FF0000'  # Added color for 'USES' relationship
     }
     color = rel_color_map.get(rel_type, '#696969')
     
     query = (
         f"MATCH (a {{id: $source_id}}), (b {{id: $target_id}}) "
-        f"CREATE (a)-[r:{rel_type} {{id: $properties.id}}]->(b) "
+        f"CREATE (a)-[r:`{rel_type}` {{id: $properties.id}}]->(b) "
         "SET r += $properties, r.color = $color "
         "RETURN r"
     )
@@ -238,6 +237,10 @@ def parse_bpmn_xml(file_path, level, module, activity=None):
     # Find root element containing process elements
     process_root = root.find('.//root') if root.find('.//root') is not None else root
 
+    # Initialize data_objects and associations
+    data_objects = {}
+    associations = []
+
     # Process all mxCell elements
     for cell in process_root.findall('.//mxCell'):
         cell_id = cell.get('id')
@@ -251,7 +254,7 @@ def parse_bpmn_xml(file_path, level, module, activity=None):
 
         if vertex == '1':  # Handle nodes
             clean_cell_id = clean_id(cell_id, id_prefix)
-            
+
             if 'shape=mxgraph.bpmn.task' in style:
                 elements['Task'].append({
                     'id': clean_cell_id,
@@ -260,7 +263,7 @@ def parse_bpmn_xml(file_path, level, module, activity=None):
                     'module': module,
                     'activity': activity
                 })
-            
+
             elif 'shape=mxgraph.bpmn.gateway2' in style:
                 gateway_type = 'XOR'  # Default gateway type
                 if 'gwType=parallel' in style:
@@ -288,6 +291,16 @@ def parse_bpmn_xml(file_path, level, module, activity=None):
                     'activity': activity
                 })
 
+            elif 'shape=mxgraph.bpmn.data' in style:
+                data_object_id = clean_cell_id
+                data_objects[data_object_id] = {
+                    'id': data_object_id,
+                    'name': value if value else f"DataObject_{cell_id}",
+                    'level': level,
+                    'module': module,
+                    'activity': activity
+                }
+
         elif edge == '1':  # Handle edges/flows
             source = cell.get('source')
             target = cell.get('target')
@@ -301,36 +314,26 @@ def parse_bpmn_xml(file_path, level, module, activity=None):
                     'module': module,
                     'activity': activity
                 }
-                flows.append(flow)
 
-                # Track gateway connections
-                if source in gateways:
-                    gateways[source]['outgoing'].append(flow)
-                if target in gateways:
-                    gateways[target]['incoming'].append(flow)
-                    
-        data_objects = {}
-    associations = []
+                # Identify associations (dashed edges without arrows)
+                if 'dashed=1' in style and 'endArrow=none' in style:
+                    associations.append({
+                        'id': clean_id(cell_id, id_prefix),
+                        'sourceRef': clean_id(source, id_prefix),
+                        'targetRef': clean_id(target, id_prefix),
+                        'name': value if value else 'Association',
+                        'level': level,
+                        'module': module,
+                        'activity': activity
+                    })
+                else:
+                    flows.append(flow)
 
-    # Process all elements
-    for elem in root.iter():
-        tag = elem.tag.lower()
-        if 'dataobject' in tag or 'dataobjectreference' in tag:
-            data_object_id = clean_id(elem.get('id'), id_prefix)
-            data_objects[data_object_id] = {
-                'id': data_object_id,
-                'name': clean_name(elem.get('name', 'DataObject')),
-                'level': level,
-                'module': module,
-                'activity': activity
-            }
-        elif 'association' in tag:
-            source_ref = clean_id(elem.get('sourceRef'), id_prefix)
-            target_ref = clean_id(elem.get('targetRef'), id_prefix)
-            associations.append({
-                'sourceRef': source_ref,
-                'targetRef': target_ref
-            })
+                    # Track gateway connections
+                    if source in gateways:
+                        gateways[source]['outgoing'].append(flow)
+                    if target in gateways:
+                        gateways[target]['incoming'].append(flow)
 
     return elements, flows, gateways, data_objects, associations
 ```
@@ -563,7 +566,7 @@ def process_bpmn_file(session, filename, file_path, level, module, activity):
                 source_id,
                 target_id,
                 'USES',
-                {'id': str(uuid.uuid4())}
+                {'id': assoc['id']}
             )
             print(f"Created USES relationship from {source_id} to {target_id}")
         except Exception as e:
@@ -712,38 +715,6 @@ if __name__ == "__main__":
     main()
 ```
 
-
-```python
-def verify_data_import():
-    with driver.session(database="erpbpmn") as session:
-        result = session.run("MATCH (n) RETURN labels(n) AS Label, count(n) AS Count ORDER BY Count DESC")
-        print("Node counts by label:")
-        for record in result:
-            print(f"{record['Label']}: {record['Count']}")
-
-        result = session.run("MATCH ()-[r]->() RETURN type(r) AS RelationType, count(r) AS Count ORDER BY Count DESC")
-        print("\nRelationship counts by type:")
-        for record in result:
-            print(f"{record['RelationType']}: {record['Count']}")
-
-        result = session.run("MATCH (n) RETURN n.level AS Level, count(n) AS Count ORDER BY Level")
-        print("\nNode counts by level:")
-        for record in result:
-            print(f"Level {record['Level']}: {record['Count']} nodes")
-```
-
-# 7. Execute Main Function
-
-
-```python
-def run():
-    main()
-    verify_data_import()
-
-if __name__ == "__main__":
-    run()
-```
-
     
     Processing BPMN Account Payable Level 1.xml at Level 1...
     Found 3 elements, 2 flows, and 0 gateways
@@ -801,6 +772,9 @@ if __name__ == "__main__":
     
     Processing BPMN Account Payable Level 3 - Creating the Purchase DP Invoice.xml at Level 3...
     Found 8 elements, 17 flows, and 3 gateways
+    Created DataObject: Account Payable_Creating the Purchase DP Invoice_3_22
+    Created DataObject: Account Payable_Creating the Purchase DP Invoice_3_26
+    Created DataObject: Account Payable_Creating the Purchase DP Invoice_3_32
     Created Task: Account Payable_Creating the Purchase DP Invoice_3_5
     Created Task: Account Payable_Creating the Purchase DP Invoice_3_6
     Created Task: Account Payable_Creating the Purchase DP Invoice_3_14
@@ -809,12 +783,9 @@ if __name__ == "__main__":
     Created Task: Account Payable_Creating the Purchase DP Invoice_3_30
     Created StartEvent: Account Payable_Creating the Purchase DP Invoice_3_4
     Created EndEvent: Account Payable_Creating the Purchase DP Invoice_3_35
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_22 and Account Payable_Creating the Purchase DP Invoice_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_21 and Account Payable_Creating the Purchase DP Invoice_3_22.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_26 and Account Payable_Creating the Purchase DP Invoice_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_24 and Account Payable_Creating the Purchase DP Invoice_3_26.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_32 and Account Payable_Creating the Purchase DP Invoice_3_34.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_30 and Account Payable_Creating the Purchase DP Invoice_3_32.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11 and Account Payable_Creating the Purchase DP Invoice_3_17.
     
     Process integrity issues found:
@@ -830,6 +801,9 @@ if __name__ == "__main__":
     
     Processing BPMN Account Payable Level 3 - Creating the Purchase Invoice.xml at Level 3...
     Found 8 elements, 17 flows, and 3 gateways
+    Created DataObject: Account Payable_Creating the Purchase Invoice_3_22
+    Created DataObject: Account Payable_Creating the Purchase Invoice_3_26
+    Created DataObject: Account Payable_Creating the Purchase Invoice_3_32
     Created Task: Account Payable_Creating the Purchase Invoice_3_5
     Created Task: Account Payable_Creating the Purchase Invoice_3_6
     Created Task: Account Payable_Creating the Purchase Invoice_3_14
@@ -838,12 +812,9 @@ if __name__ == "__main__":
     Created Task: Account Payable_Creating the Purchase Invoice_3_30
     Created StartEvent: Account Payable_Creating the Purchase Invoice_3_4
     Created EndEvent: Account Payable_Creating the Purchase Invoice_3_35
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_22 and Account Payable_Creating the Purchase Invoice_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_21 and Account Payable_Creating the Purchase Invoice_3_22.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_26 and Account Payable_Creating the Purchase Invoice_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_24 and Account Payable_Creating the Purchase Invoice_3_26.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_32 and Account Payable_Creating the Purchase Invoice_3_34.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_30 and Account Payable_Creating the Purchase Invoice_3_32.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_Creating the Purchase Invoice_3_11 and Account Payable_Creating the Purchase Invoice_3_17.
     
     Process integrity issues found:
@@ -866,15 +837,15 @@ if __name__ == "__main__":
     
     Processing BPMN Account Payable Level 3 - Finalizing Purchase DP Invoice Document.xml at Level 3...
     Found 5 elements, 8 flows, and 0 gateways
+    Created DataObject: Account Payable_Finalizing Purchase DP Invoice Document_3_10
+    Created DataObject: Account Payable_Finalizing Purchase DP Invoice Document_3_13
     Created Task: Account Payable_Finalizing Purchase DP Invoice Document_3_5
     Created Task: Account Payable_Finalizing Purchase DP Invoice Document_3_7
     Created Task: Account Payable_Finalizing Purchase DP Invoice Document_3_17
     Created StartEvent: Account Payable_Finalizing Purchase DP Invoice Document_3_4
     Created EndEvent: Account Payable_Finalizing Purchase DP Invoice Document_3_15
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase DP Invoice Document_3_10 and Account Payable_Finalizing Purchase DP Invoice Document_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase DP Invoice Document_3_9 and Account Payable_Finalizing Purchase DP Invoice Document_3_10.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase DP Invoice Document_3_13 and Account Payable_Finalizing Purchase DP Invoice Document_3_14.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase DP Invoice Document_3_17 and Account Payable_Finalizing Purchase DP Invoice Document_3_13.
     
     Process integrity issues found:
     
@@ -896,15 +867,15 @@ if __name__ == "__main__":
     
     Processing BPMN Account Payable Level 3 - Finalizing Purchase Invoice Document.xml at Level 3...
     Found 5 elements, 8 flows, and 0 gateways
+    Created DataObject: Account Payable_Finalizing Purchase Invoice Document_3_10
+    Created DataObject: Account Payable_Finalizing Purchase Invoice Document_3_13
     Created Task: Account Payable_Finalizing Purchase Invoice Document_3_5
     Created Task: Account Payable_Finalizing Purchase Invoice Document_3_7
     Created Task: Account Payable_Finalizing Purchase Invoice Document_3_17
     Created StartEvent: Account Payable_Finalizing Purchase Invoice Document_3_4
     Created EndEvent: Account Payable_Finalizing Purchase Invoice Document_3_15
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase Invoice Document_3_10 and Account Payable_Finalizing Purchase Invoice Document_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase Invoice Document_3_9 and Account Payable_Finalizing Purchase Invoice Document_3_10.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase Invoice Document_3_13 and Account Payable_Finalizing Purchase Invoice Document_3_14.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase Invoice Document_3_17 and Account Payable_Finalizing Purchase Invoice Document_3_13.
     
     Process integrity issues found:
     
@@ -926,16 +897,16 @@ if __name__ == "__main__":
     
     Processing BPMN Account Payable Level 3 - Reviewing Purchase DP Invoice.xml at Level 3...
     Found 6 elements, 13 flows, and 3 gateways
+    Created DataObject: Account Payable_Reviewing Purchase DP Invoice_3_9
+    Created DataObject: Account Payable_Reviewing Purchase DP Invoice_3_12
     Created Task: Account Payable_Reviewing Purchase DP Invoice_3_5
     Created Task: Account Payable_Reviewing Purchase DP Invoice_3_6
     Created Task: Account Payable_Reviewing Purchase DP Invoice_3_16
     Created Task: Account Payable_Reviewing Purchase DP Invoice_3_23
     Created StartEvent: Account Payable_Reviewing Purchase DP Invoice_3_4
     Created EndEvent: Account Payable_Reviewing Purchase DP Invoice_3_14
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase DP Invoice_3_9 and Account Payable_Reviewing Purchase DP Invoice_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase DP Invoice_3_8 and Account Payable_Reviewing Purchase DP Invoice_3_9.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase DP Invoice_3_12 and Account Payable_Reviewing Purchase DP Invoice_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase DP Invoice_3_23 and Account Payable_Reviewing Purchase DP Invoice_3_12.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19 and Account Payable_Reviewing Purchase DP Invoice_3_20.
     
     Process integrity issues found:
@@ -959,16 +930,16 @@ if __name__ == "__main__":
     
     Processing BPMN Account Payable Level 3 - Reviewing Purchase Invoice.xml at Level 3...
     Found 6 elements, 13 flows, and 3 gateways
+    Created DataObject: Account Payable_Reviewing Purchase Invoice_3_9
+    Created DataObject: Account Payable_Reviewing Purchase Invoice_3_12
     Created Task: Account Payable_Reviewing Purchase Invoice_3_5
     Created Task: Account Payable_Reviewing Purchase Invoice_3_6
     Created Task: Account Payable_Reviewing Purchase Invoice_3_16
     Created Task: Account Payable_Reviewing Purchase Invoice_3_23
     Created StartEvent: Account Payable_Reviewing Purchase Invoice_3_4
     Created EndEvent: Account Payable_Reviewing Purchase Invoice_3_14
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase Invoice_3_9 and Account Payable_Reviewing Purchase Invoice_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase Invoice_3_8 and Account Payable_Reviewing Purchase Invoice_3_9.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase Invoice_3_12 and Account Payable_Reviewing Purchase Invoice_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase Invoice_3_23 and Account Payable_Reviewing Purchase Invoice_3_12.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_Reviewing Purchase Invoice_3_19 and Account Payable_Reviewing Purchase Invoice_3_20.
     
     Process integrity issues found:
@@ -993,12 +964,12 @@ if __name__ == "__main__":
     
     Processing BPMN Account Payable Level 3 - Updating Purchase DP Invoice Data.xml at Level 3...
     Found 4 elements, 7 flows, and 0 gateways
+    Created DataObject: Account Payable_Updating Purchase DP Invoice Data_3_10
+    Created DataObject: Account Payable_Updating Purchase DP Invoice Data_3_13
     Created Task: Account Payable_Updating Purchase DP Invoice Data_3_5
     Created Task: Account Payable_Updating Purchase DP Invoice Data_3_7
     Created StartEvent: Account Payable_Updating Purchase DP Invoice Data_3_4
     Created EndEvent: Account Payable_Updating Purchase DP Invoice Data_3_15
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase DP Invoice Data_3_7 and Account Payable_Updating Purchase DP Invoice Data_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase DP Invoice Data_3_10 and Account Payable_Updating Purchase DP Invoice Data_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase DP Invoice Data_3_9 and Account Payable_Updating Purchase DP Invoice Data_3_10.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase DP Invoice Data_3_13 and Account Payable_Updating Purchase DP Invoice Data_3_14.
     
@@ -1024,12 +995,12 @@ if __name__ == "__main__":
     
     Processing BPMN Account Payable Level 3 - Updating Purchase Invoice Data.xml at Level 3...
     Found 4 elements, 7 flows, and 0 gateways
+    Created DataObject: Account Payable_Updating Purchase Invoice Data_3_10
+    Created DataObject: Account Payable_Updating Purchase Invoice Data_3_13
     Created Task: Account Payable_Updating Purchase Invoice Data_3_5
     Created Task: Account Payable_Updating Purchase Invoice Data_3_7
     Created StartEvent: Account Payable_Updating Purchase Invoice Data_3_4
     Created EndEvent: Account Payable_Updating Purchase Invoice Data_3_15
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase Invoice Data_3_7 and Account Payable_Updating Purchase Invoice Data_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase Invoice Data_3_10 and Account Payable_Updating Purchase Invoice Data_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase Invoice Data_3_9 and Account Payable_Updating Purchase Invoice Data_3_10.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase Invoice Data_3_13 and Account Payable_Updating Purchase Invoice Data_3_14.
     
@@ -1145,6 +1116,9 @@ if __name__ == "__main__":
     
     Processing BPMN Account Receivable Level 3 - Creating the Sales DP Invoice.xml at Level 3...
     Found 8 elements, 17 flows, and 3 gateways
+    Created DataObject: Account Receivable_Creating the Sales DP Invoice_3_22
+    Created DataObject: Account Receivable_Creating the Sales DP Invoice_3_26
+    Created DataObject: Account Receivable_Creating the Sales DP Invoice_3_32
     Created Task: Account Receivable_Creating the Sales DP Invoice_3_5
     Created Task: Account Receivable_Creating the Sales DP Invoice_3_6
     Created Task: Account Receivable_Creating the Sales DP Invoice_3_14
@@ -1153,12 +1127,9 @@ if __name__ == "__main__":
     Created Task: Account Receivable_Creating the Sales DP Invoice_3_30
     Created StartEvent: Account Receivable_Creating the Sales DP Invoice_3_4
     Created EndEvent: Account Receivable_Creating the Sales DP Invoice_3_35
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_22 and Account Receivable_Creating the Sales DP Invoice_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_21 and Account Receivable_Creating the Sales DP Invoice_3_22.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_26 and Account Receivable_Creating the Sales DP Invoice_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_24 and Account Receivable_Creating the Sales DP Invoice_3_26.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_32 and Account Receivable_Creating the Sales DP Invoice_3_34.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_30 and Account Receivable_Creating the Sales DP Invoice_3_32.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11 and Account Receivable_Creating the Sales DP Invoice_3_17.
     
     Process integrity issues found:
@@ -1190,6 +1161,9 @@ if __name__ == "__main__":
     
     Processing BPMN Account Receivable Level 3 - Creating the Sales Invoice.xml at Level 3...
     Found 8 elements, 17 flows, and 3 gateways
+    Created DataObject: Account Receivable_Creating the Sales Invoice_3_22
+    Created DataObject: Account Receivable_Creating the Sales Invoice_3_26
+    Created DataObject: Account Receivable_Creating the Sales Invoice_3_32
     Created Task: Account Receivable_Creating the Sales Invoice_3_5
     Created Task: Account Receivable_Creating the Sales Invoice_3_6
     Created Task: Account Receivable_Creating the Sales Invoice_3_14
@@ -1198,12 +1172,9 @@ if __name__ == "__main__":
     Created Task: Account Receivable_Creating the Sales Invoice_3_30
     Created StartEvent: Account Receivable_Creating the Sales Invoice_3_4
     Created EndEvent: Account Receivable_Creating the Sales Invoice_3_35
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_22 and Account Receivable_Creating the Sales Invoice_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_21 and Account Receivable_Creating the Sales Invoice_3_22.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_26 and Account Receivable_Creating the Sales Invoice_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_24 and Account Receivable_Creating the Sales Invoice_3_26.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_32 and Account Receivable_Creating the Sales Invoice_3_34.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_30 and Account Receivable_Creating the Sales Invoice_3_32.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_Creating the Sales Invoice_3_11 and Account Receivable_Creating the Sales Invoice_3_17.
     
     Process integrity issues found:
@@ -1238,15 +1209,15 @@ if __name__ == "__main__":
     
     Processing BPMN Account Receivable Level 3 - Finalizing Sales DP Invoice Document.xml at Level 3...
     Found 5 elements, 8 flows, and 0 gateways
+    Created DataObject: Account Receivable_Finalizing Sales DP Invoice Document_3_10
+    Created DataObject: Account Receivable_Finalizing Sales DP Invoice Document_3_13
     Created Task: Account Receivable_Finalizing Sales DP Invoice Document_3_5
     Created Task: Account Receivable_Finalizing Sales DP Invoice Document_3_7
     Created Task: Account Receivable_Finalizing Sales DP Invoice Document_3_17
     Created StartEvent: Account Receivable_Finalizing Sales DP Invoice Document_3_4
     Created EndEvent: Account Receivable_Finalizing Sales DP Invoice Document_3_15
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales DP Invoice Document_3_10 and Account Receivable_Finalizing Sales DP Invoice Document_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales DP Invoice Document_3_9 and Account Receivable_Finalizing Sales DP Invoice Document_3_10.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales DP Invoice Document_3_13 and Account Receivable_Finalizing Sales DP Invoice Document_3_14.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales DP Invoice Document_3_17 and Account Receivable_Finalizing Sales DP Invoice Document_3_13.
     
     Process integrity issues found:
     
@@ -1280,15 +1251,15 @@ if __name__ == "__main__":
     
     Processing BPMN Account Receivable Level 3 - Finalizing Sales Invoice Document.xml at Level 3...
     Found 5 elements, 8 flows, and 0 gateways
+    Created DataObject: Account Receivable_Finalizing Sales Invoice Document_3_10
+    Created DataObject: Account Receivable_Finalizing Sales Invoice Document_3_13
     Created Task: Account Receivable_Finalizing Sales Invoice Document_3_5
     Created Task: Account Receivable_Finalizing Sales Invoice Document_3_7
     Created Task: Account Receivable_Finalizing Sales Invoice Document_3_17
     Created StartEvent: Account Receivable_Finalizing Sales Invoice Document_3_4
     Created EndEvent: Account Receivable_Finalizing Sales Invoice Document_3_15
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales Invoice Document_3_10 and Account Receivable_Finalizing Sales Invoice Document_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales Invoice Document_3_9 and Account Receivable_Finalizing Sales Invoice Document_3_10.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales Invoice Document_3_13 and Account Receivable_Finalizing Sales Invoice Document_3_14.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales Invoice Document_3_17 and Account Receivable_Finalizing Sales Invoice Document_3_13.
     
     Process integrity issues found:
     
@@ -1322,16 +1293,16 @@ if __name__ == "__main__":
     
     Processing BPMN Account Receivable Level 3 - Reviewing Sales DP Invoice.xml at Level 3...
     Found 6 elements, 13 flows, and 3 gateways
+    Created DataObject: Account Receivable_Reviewing Sales DP Invoice_3_9
+    Created DataObject: Account Receivable_Reviewing Sales DP Invoice_3_12
     Created Task: Account Receivable_Reviewing Sales DP Invoice_3_5
     Created Task: Account Receivable_Reviewing Sales DP Invoice_3_6
     Created Task: Account Receivable_Reviewing Sales DP Invoice_3_16
     Created Task: Account Receivable_Reviewing Sales DP Invoice_3_23
     Created StartEvent: Account Receivable_Reviewing Sales DP Invoice_3_4
     Created EndEvent: Account Receivable_Reviewing Sales DP Invoice_3_14
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales DP Invoice_3_9 and Account Receivable_Reviewing Sales DP Invoice_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales DP Invoice_3_8 and Account Receivable_Reviewing Sales DP Invoice_3_9.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales DP Invoice_3_12 and Account Receivable_Reviewing Sales DP Invoice_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales DP Invoice_3_23 and Account Receivable_Reviewing Sales DP Invoice_3_12.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19 and Account Receivable_Reviewing Sales DP Invoice_3_20.
     
     Process integrity issues found:
@@ -1367,16 +1338,16 @@ if __name__ == "__main__":
     
     Processing BPMN Account Receivable Level 3 - Reviewing Sales Invoice.xml at Level 3...
     Found 6 elements, 13 flows, and 3 gateways
+    Created DataObject: Account Receivable_Reviewing Sales Invoice_3_9
+    Created DataObject: Account Receivable_Reviewing Sales Invoice_3_12
     Created Task: Account Receivable_Reviewing Sales Invoice_3_5
     Created Task: Account Receivable_Reviewing Sales Invoice_3_6
     Created Task: Account Receivable_Reviewing Sales Invoice_3_16
     Created Task: Account Receivable_Reviewing Sales Invoice_3_23
     Created StartEvent: Account Receivable_Reviewing Sales Invoice_3_4
     Created EndEvent: Account Receivable_Reviewing Sales Invoice_3_14
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales Invoice_3_9 and Account Receivable_Reviewing Sales Invoice_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales Invoice_3_8 and Account Receivable_Reviewing Sales Invoice_3_9.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales Invoice_3_12 and Account Receivable_Reviewing Sales Invoice_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales Invoice_3_23 and Account Receivable_Reviewing Sales Invoice_3_12.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_Reviewing Sales Invoice_3_19 and Account Receivable_Reviewing Sales Invoice_3_20.
     
     Process integrity issues found:
@@ -1413,12 +1384,12 @@ if __name__ == "__main__":
     
     Processing BPMN Account Receivable Level 3 - Updating Sales DP Invoice Data.xml at Level 3...
     Found 4 elements, 7 flows, and 0 gateways
+    Created DataObject: Account Receivable_Updating Sales DP Invoice Data_3_10
+    Created DataObject: Account Receivable_Updating Sales DP Invoice Data_3_13
     Created Task: Account Receivable_Updating Sales DP Invoice Data_3_5
     Created Task: Account Receivable_Updating Sales DP Invoice Data_3_7
     Created StartEvent: Account Receivable_Updating Sales DP Invoice Data_3_4
     Created EndEvent: Account Receivable_Updating Sales DP Invoice Data_3_15
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales DP Invoice Data_3_7 and Account Receivable_Updating Sales DP Invoice Data_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales DP Invoice Data_3_10 and Account Receivable_Updating Sales DP Invoice Data_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales DP Invoice Data_3_9 and Account Receivable_Updating Sales DP Invoice Data_3_10.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales DP Invoice Data_3_13 and Account Receivable_Updating Sales DP Invoice Data_3_14.
     
@@ -1456,24 +1427,24 @@ if __name__ == "__main__":
     
     Processing BPMN Account Receivable Level 3 - Updating Sales Invoice Data.xml at Level 3...
     Found 4 elements, 7 flows, and 0 gateways
+    Created DataObject: Account Receivable_Updating Sales Invoice Data_3_10
+    Created DataObject: Account Receivable_Updating Sales Invoice Data_3_13
     Created Task: Account Receivable_Updating Sales Invoice Data_3_5
     Created Task: Account Receivable_Updating Sales Invoice Data_3_7
     Created StartEvent: Account Receivable_Updating Sales Invoice Data_3_4
     Created EndEvent: Account Receivable_Updating Sales Invoice Data_3_15
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales Invoice Data_3_7 and Account Receivable_Updating Sales Invoice Data_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales Invoice Data_3_10 and Account Receivable_Updating Sales Invoice Data_3_5.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales Invoice Data_3_9 and Account Receivable_Updating Sales Invoice Data_3_10.
     Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales Invoice Data_3_13 and Account Receivable_Updating Sales Invoice Data_3_14.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     
     Check results:
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
@@ -1506,12 +1477,12 @@ if __name__ == "__main__":
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     
     Check results:
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
@@ -1595,26 +1566,14 @@ if __name__ == "__main__":
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     
     Check results:
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
@@ -1635,9 +1594,25 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
     
     Processing BPMN Asset Management Level 3 - Asset Category Process.xml at Level 3...
     Found 10 elements, 25 flows, and 4 gateways
+    Created DataObject: Asset Management_Asset Category Process_3_13
+    Created DataObject: Asset Management_Asset Category Process_3_27
+    Created DataObject: Asset Management_Asset Category Process_3_35
+    Created DataObject: Asset Management_Asset Category Process_3_43
     Created Task: Asset Management_Asset Category Process_3_5
     Created Task: Asset Management_Asset Category Process_3_7
     Created Task: Asset Management_Asset Category Process_3_10
@@ -1649,12 +1624,8 @@ if __name__ == "__main__":
     Created StartEvent: Asset Management_Asset Category Process_3_4
     Created EndEvent: Asset Management_Asset Category Process_3_11
     Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_12 and Asset Management_Asset Category Process_3_40.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_10 and Asset Management_Asset Category Process_3_13.
     Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_12 and Asset Management_Asset Category Process_3_27.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_27 and Asset Management_Asset Category Process_3_37.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_35 and Asset Management_Asset Category Process_3_33.
     Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_43 and Asset Management_Asset Category Process_3_12.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_40 and Asset Management_Asset Category Process_3_43.
     Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_35 and Asset Management_Asset Category Process_3_12.
     Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_13 and Asset Management_Asset Category Process_3_12.
     Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Asset Category Process_3_20 and Asset Management_Asset Category Process_3_23.
@@ -1664,14 +1635,34 @@ if __name__ == "__main__":
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -1685,6 +1676,48 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    
+    Processing BPMN Asset Management Level 3 - Asset Management Registration Process.xml at Level 3...
+    Found 9 elements, 27 flows, and 4 gateways
+    Created DataObject: Asset Management_Asset Management Registration Process_3_7
+    Created DataObject: Asset Management_Asset Management Registration Process_3_14
+    Created DataObject: Asset Management_Asset Management Registration Process_3_23
+    Created DataObject: Asset Management_Asset Management Registration Process_3_38
+    Created DataObject: Asset Management_Asset Management Registration Process_3_47
+    Created DataObject: Asset Management_Asset Management Registration Process_3_53
+    Created Task: Asset Management_Asset Management Registration Process_3_5
+    Created Task: Asset Management_Asset Management Registration Process_3_11
+    Created Task: Asset Management_Asset Management Registration Process_3_19
+    Created Task: Asset Management_Asset Management Registration Process_3_28
+    Created Task: Asset Management_Asset Management Registration Process_3_41
+    Created Task: Asset Management_Asset Management Registration Process_3_44
+    Created Task: Asset Management_Asset Management Registration Process_3_50
+    Created StartEvent: Asset Management_Asset Management Registration Process_3_4
+    Created EndEvent: Asset Management_Asset Management Registration Process_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_23 and Asset Management_Asset Management Registration Process_3_21.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_21 and Asset Management_Asset Management Registration Process_3_38.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_47 and Asset Management_Asset Management Registration Process_3_21.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Asset Management Registration Process_3_30 and Asset Management_Asset Management Registration Process_3_33.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Management Registration Process_3_30 and invisible_task_Asset Management_Asset Management Registration Process_3_33.
+    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Asset Management Registration Process_3_33 and Asset Management_Asset Management Registration Process_3_37.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Management Registration Process_3_33 and invisible_task_Asset Management_Asset Management Registration Process_3_37.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20']}
+    
+    Check results:
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
@@ -1705,51 +1738,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
-    
-    Check results:
-    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
-    
-    Processing BPMN Asset Management Level 3 - Asset Management Registration Process.xml at Level 3...
-    Found 9 elements, 27 flows, and 4 gateways
-    Created Task: Asset Management_Asset Management Registration Process_3_5
-    Created Task: Asset Management_Asset Management Registration Process_3_11
-    Created Task: Asset Management_Asset Management Registration Process_3_19
-    Created Task: Asset Management_Asset Management Registration Process_3_28
-    Created Task: Asset Management_Asset Management Registration Process_3_41
-    Created Task: Asset Management_Asset Management Registration Process_3_44
-    Created Task: Asset Management_Asset Management Registration Process_3_50
-    Created StartEvent: Asset Management_Asset Management Registration Process_3_4
-    Created EndEvent: Asset Management_Asset Management Registration Process_3_20
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_53 and Asset Management_Asset Management Registration Process_3_44.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_7 and Asset Management_Asset Management Registration Process_3_44.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_7 and Asset Management_Asset Management Registration Process_3_11.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_14 and Asset Management_Asset Management Registration Process_3_11.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_23 and Asset Management_Asset Management Registration Process_3_21.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_19 and Asset Management_Asset Management Registration Process_3_23.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_21 and Asset Management_Asset Management Registration Process_3_38.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_38 and Asset Management_Asset Management Registration Process_3_50.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_47 and Asset Management_Asset Management Registration Process_3_21.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_14 and Asset Management_Asset Management Registration Process_3_44.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_47 and Asset Management_Asset Management Registration Process_3_44.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_53 and Asset Management_Asset Management Registration Process_3_11.
-    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Asset Management Registration Process_3_30 and Asset Management_Asset Management Registration Process_3_33.
-    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Management Registration Process_3_30 and invisible_task_Asset Management_Asset Management Registration Process_3_33.
-    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Asset Management Registration Process_3_33 and Asset Management_Asset Management Registration Process_3_37.
-    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Management Registration Process_3_33 and invisible_task_Asset Management_Asset Management Registration Process_3_37.
-    
-    Process integrity issues found:
-    
-    Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
-    
-    Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
-    
-    Check results:
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -1764,6 +1752,47 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    
+    Processing BPMN Asset Management Level 3 - Asset Transfer.xml at Level 3...
+    Found 9 elements, 22 flows, and 4 gateways
+    Created DataObject: Asset Management_Asset Transfer_3_13
+    Created DataObject: Asset Management_Asset Transfer_3_28
+    Created DataObject: Asset Management_Asset Transfer_3_36
+    Created DataObject: Asset Management_Asset Transfer_3_42
+    Created Task: Asset Management_Asset Transfer_3_4
+    Created Task: Asset Management_Asset Transfer_3_6
+    Created Task: Asset Management_Asset Transfer_3_9
+    Created Task: Asset Management_Asset Transfer_3_18
+    Created Task: Asset Management_Asset Transfer_3_31
+    Created Task: Asset Management_Asset Transfer_3_34
+    Created Task: Asset Management_Asset Transfer_3_38
+    Created StartEvent: Asset Management_Asset Transfer_3_3
+    Created EndEvent: Asset Management_Asset Transfer_3_10
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_13 and Asset Management_Asset Transfer_3_11.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_11 and Asset Management_Asset Transfer_3_28.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_36 and Asset Management_Asset Transfer_3_11.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Asset Transfer_3_20 and Asset Management_Asset Transfer_3_23.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Transfer_3_20 and invisible_task_Asset Management_Asset Transfer_3_23.
+    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Asset Transfer_3_23 and Asset Management_Asset Transfer_3_27.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Transfer_3_23 and invisible_task_Asset Management_Asset Transfer_3_27.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10']}
+    
+    Check results:
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
@@ -1784,47 +1813,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
-    
-    Check results:
-    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
-    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
-    
-    Processing BPMN Asset Management Level 3 - Asset Transfer.xml at Level 3...
-    Found 9 elements, 22 flows, and 4 gateways
-    Created Task: Asset Management_Asset Transfer_3_4
-    Created Task: Asset Management_Asset Transfer_3_6
-    Created Task: Asset Management_Asset Transfer_3_9
-    Created Task: Asset Management_Asset Transfer_3_18
-    Created Task: Asset Management_Asset Transfer_3_31
-    Created Task: Asset Management_Asset Transfer_3_34
-    Created Task: Asset Management_Asset Transfer_3_38
-    Created StartEvent: Asset Management_Asset Transfer_3_3
-    Created EndEvent: Asset Management_Asset Transfer_3_10
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_13 and Asset Management_Asset Transfer_3_11.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_9 and Asset Management_Asset Transfer_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_11 and Asset Management_Asset Transfer_3_28.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_28 and Asset Management_Asset Transfer_3_38.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_36 and Asset Management_Asset Transfer_3_34.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_36 and Asset Management_Asset Transfer_3_11.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_42 and Asset Management_Asset Transfer_3_6.
-    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Asset Transfer_3_20 and Asset Management_Asset Transfer_3_23.
-    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Transfer_3_20 and invisible_task_Asset Management_Asset Transfer_3_23.
-    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Asset Transfer_3_23 and Asset Management_Asset Transfer_3_27.
-    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Transfer_3_23 and invisible_task_Asset Management_Asset Transfer_3_27.
-    
-    Process integrity issues found:
-    
-    Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
-    
-    Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
-    
-    Check results:
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -1840,6 +1828,50 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    
+    Processing BPMN Asset Management Level 3 - Fiscal Type.xml at Level 3...
+    Found 10 elements, 25 flows, and 4 gateways
+    Created DataObject: Asset Management_Fiscal Type_3_13
+    Created DataObject: Asset Management_Fiscal Type_3_28
+    Created DataObject: Asset Management_Fiscal Type_3_36
+    Created DataObject: Asset Management_Fiscal Type_3_43
+    Created Task: Asset Management_Fiscal Type_3_4
+    Created Task: Asset Management_Fiscal Type_3_6
+    Created Task: Asset Management_Fiscal Type_3_9
+    Created Task: Asset Management_Fiscal Type_3_18
+    Created Task: Asset Management_Fiscal Type_3_31
+    Created Task: Asset Management_Fiscal Type_3_34
+    Created Task: Asset Management_Fiscal Type_3_38
+    Created Task: Asset Management_Fiscal Type_3_40
+    Created StartEvent: Asset Management_Fiscal Type_3_3
+    Created EndEvent: Asset Management_Fiscal Type_3_10
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_13 and Asset Management_Fiscal Type_3_11.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_11 and Asset Management_Fiscal Type_3_28.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_43 and Asset Management_Fiscal Type_3_11.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_36 and Asset Management_Fiscal Type_3_11.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Fiscal Type_3_20 and Asset Management_Fiscal Type_3_23.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Fiscal Type_3_20 and invisible_task_Asset Management_Fiscal Type_3_23.
+    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Fiscal Type_3_23 and Asset Management_Fiscal Type_3_27.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Fiscal Type_3_23 and invisible_task_Asset Management_Fiscal Type_3_27.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    
+    Check results:
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
@@ -1860,50 +1892,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
-    
-    Check results:
-    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
-    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
-    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
-    
-    Processing BPMN Asset Management Level 3 - Fiscal Type.xml at Level 3...
-    Found 10 elements, 25 flows, and 4 gateways
-    Created Task: Asset Management_Fiscal Type_3_4
-    Created Task: Asset Management_Fiscal Type_3_6
-    Created Task: Asset Management_Fiscal Type_3_9
-    Created Task: Asset Management_Fiscal Type_3_18
-    Created Task: Asset Management_Fiscal Type_3_31
-    Created Task: Asset Management_Fiscal Type_3_34
-    Created Task: Asset Management_Fiscal Type_3_38
-    Created Task: Asset Management_Fiscal Type_3_40
-    Created StartEvent: Asset Management_Fiscal Type_3_3
-    Created EndEvent: Asset Management_Fiscal Type_3_10
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_13 and Asset Management_Fiscal Type_3_11.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_9 and Asset Management_Fiscal Type_3_13.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_11 and Asset Management_Fiscal Type_3_28.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_28 and Asset Management_Fiscal Type_3_38.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_36 and Asset Management_Fiscal Type_3_34.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_43 and Asset Management_Fiscal Type_3_11.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_40 and Asset Management_Fiscal Type_3_43.
-    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_36 and Asset Management_Fiscal Type_3_11.
-    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Fiscal Type_3_20 and Asset Management_Fiscal Type_3_23.
-    Warning: Could not create relationship XOR_JOIN between Asset Management_Fiscal Type_3_20 and invisible_task_Asset Management_Fiscal Type_3_23.
-    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Fiscal Type_3_23 and Asset Management_Fiscal Type_3_27.
-    Warning: Could not create relationship XOR_JOIN between Asset Management_Fiscal Type_3_23 and invisible_task_Asset Management_Fiscal Type_3_27.
-    
-    Process integrity issues found:
-    
-    Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
-    
-    Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
-    
-    Check results:
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -1920,26 +1908,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -1956,32 +1924,16 @@ if __name__ == "__main__":
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     
     Check results:
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
@@ -2002,6 +1954,22 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2066,16 +2034,36 @@ if __name__ == "__main__":
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2100,26 +2088,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2129,30 +2097,50 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Managing Currency Exchange.xml at Level 3...
     Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Managing Currency Exchange_3_14
+    Created DataObject: Cash Bank_Managing Currency Exchange_3_18
     Created Task: Cash Bank_Managing Currency Exchange_3_6
     Created Task: Cash Bank_Managing Currency Exchange_3_7
     Created Task: Cash Bank_Managing Currency Exchange_3_10
     Created Task: Cash Bank_Managing Currency Exchange_3_21
     Created StartEvent: Cash Bank_Managing Currency Exchange_3_5
     Created EndEvent: Cash Bank_Managing Currency Exchange_3_20
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Managing Currency Exchange_3_21 and Cash Bank_Managing Currency Exchange_3_18.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Managing Currency Exchange_3_14 and Cash Bank_Managing Currency Exchange_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Managing Currency Exchange_3_13 and Cash Bank_Managing Currency Exchange_3_14.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Managing Currency Exchange_3_18 and Cash Bank_Managing Currency Exchange_3_19.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
-    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2177,26 +2165,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2206,32 +2174,52 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Disbursing Bank Payment.xml at Level 3...
     Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Disbursing Bank Payment_3_14
+    Created DataObject: Cash Bank_Proses Disbursing Bank Payment_3_18
     Created Task: Cash Bank_Proses Disbursing Bank Payment_3_6
     Created Task: Cash Bank_Proses Disbursing Bank Payment_3_7
     Created Task: Cash Bank_Proses Disbursing Bank Payment_3_10
     Created Task: Cash Bank_Proses Disbursing Bank Payment_3_21
     Created StartEvent: Cash Bank_Proses Disbursing Bank Payment_3_5
     Created EndEvent: Cash Bank_Proses Disbursing Bank Payment_3_20
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Bank Payment_3_21 and Cash Bank_Proses Disbursing Bank Payment_3_18.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Bank Payment_3_14 and Cash Bank_Proses Disbursing Bank Payment_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Bank Payment_3_13 and Cash Bank_Proses Disbursing Bank Payment_3_14.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Bank Payment_3_18 and Cash Bank_Proses Disbursing Bank Payment_3_19.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2256,26 +2244,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2285,32 +2253,52 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Disbursing Cash Payment.xml at Level 3...
     Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Disbursing Cash Payment_3_14
+    Created DataObject: Cash Bank_Proses Disbursing Cash Payment_3_18
     Created Task: Cash Bank_Proses Disbursing Cash Payment_3_6
     Created Task: Cash Bank_Proses Disbursing Cash Payment_3_7
     Created Task: Cash Bank_Proses Disbursing Cash Payment_3_10
     Created Task: Cash Bank_Proses Disbursing Cash Payment_3_21
     Created StartEvent: Cash Bank_Proses Disbursing Cash Payment_3_5
     Created EndEvent: Cash Bank_Proses Disbursing Cash Payment_3_20
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Cash Payment_3_21 and Cash Bank_Proses Disbursing Cash Payment_3_18.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Cash Payment_3_14 and Cash Bank_Proses Disbursing Cash Payment_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Cash Payment_3_13 and Cash Bank_Proses Disbursing Cash Payment_3_14.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Cash Payment_3_18 and Cash Bank_Proses Disbursing Cash Payment_3_19.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2335,26 +2323,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2364,32 +2332,52 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Managing Bank Account.xml at Level 3...
     Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Managing Bank Account_3_14
+    Created DataObject: Cash Bank_Proses Managing Bank Account_3_18
     Created Task: Cash Bank_Proses Managing Bank Account_3_6
     Created Task: Cash Bank_Proses Managing Bank Account_3_7
     Created Task: Cash Bank_Proses Managing Bank Account_3_10
     Created Task: Cash Bank_Proses Managing Bank Account_3_21
     Created StartEvent: Cash Bank_Proses Managing Bank Account_3_5
     Created EndEvent: Cash Bank_Proses Managing Bank Account_3_20
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Account_3_21 and Cash Bank_Proses Managing Bank Account_3_18.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Account_3_14 and Cash Bank_Proses Managing Bank Account_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Account_3_13 and Cash Bank_Proses Managing Bank Account_3_14.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Account_3_18 and Cash Bank_Proses Managing Bank Account_3_19.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2414,26 +2402,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2443,15 +2411,15 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Managing Bank Management.xml at Level 3...
     Found 6 elements, 11 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Managing Bank Management_3_15
+    Created DataObject: Cash Bank_Proses Managing Bank Management_3_19
+    Created DataObject: Cash Bank_Proses Managing Bank Management_3_26
     Created Task: Cash Bank_Proses Managing Bank Management_3_6
     Created Task: Cash Bank_Proses Managing Bank Management_3_7
     Created Task: Cash Bank_Proses Managing Bank Management_3_11
     Created Task: Cash Bank_Proses Managing Bank Management_3_22
     Created StartEvent: Cash Bank_Proses Managing Bank Management_3_5
     Created EndEvent: Cash Bank_Proses Managing Bank Management_3_21
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_22 and Cash Bank_Proses Managing Bank Management_3_19.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_11 and Cash Bank_Proses Managing Bank Management_3_26.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_15 and Cash Bank_Proses Managing Bank Management_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_14 and Cash Bank_Proses Managing Bank Management_3_15.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_19 and Cash Bank_Proses Managing Bank Management_3_20.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_26 and Cash Bank_Proses Managing Bank Management_3_27.
@@ -2459,18 +2427,38 @@ if __name__ == "__main__":
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2495,26 +2483,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2524,32 +2492,52 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Managing Cash Account.xml at Level 3...
     Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Managing Cash Account_3_14
+    Created DataObject: Cash Bank_Proses Managing Cash Account_3_18
     Created Task: Cash Bank_Proses Managing Cash Account_3_6
     Created Task: Cash Bank_Proses Managing Cash Account_3_7
     Created Task: Cash Bank_Proses Managing Cash Account_3_10
     Created Task: Cash Bank_Proses Managing Cash Account_3_21
     Created StartEvent: Cash Bank_Proses Managing Cash Account_3_5
     Created EndEvent: Cash Bank_Proses Managing Cash Account_3_20
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Account_3_21 and Cash Bank_Proses Managing Cash Account_3_18.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Account_3_14 and Cash Bank_Proses Managing Cash Account_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Account_3_13 and Cash Bank_Proses Managing Cash Account_3_14.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Account_3_18 and Cash Bank_Proses Managing Cash Account_3_19.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2574,26 +2562,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2603,15 +2571,15 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Managing Cash Management.xml at Level 3...
     Found 6 elements, 11 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Managing Cash Management_3_15
+    Created DataObject: Cash Bank_Proses Managing Cash Management_3_19
+    Created DataObject: Cash Bank_Proses Managing Cash Management_3_26
     Created Task: Cash Bank_Proses Managing Cash Management_3_6
     Created Task: Cash Bank_Proses Managing Cash Management_3_7
     Created Task: Cash Bank_Proses Managing Cash Management_3_11
     Created Task: Cash Bank_Proses Managing Cash Management_3_22
     Created StartEvent: Cash Bank_Proses Managing Cash Management_3_5
     Created EndEvent: Cash Bank_Proses Managing Cash Management_3_21
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_22 and Cash Bank_Proses Managing Cash Management_3_19.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_11 and Cash Bank_Proses Managing Cash Management_3_26.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_15 and Cash Bank_Proses Managing Cash Management_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_14 and Cash Bank_Proses Managing Cash Management_3_15.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_19 and Cash Bank_Proses Managing Cash Management_3_20.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_26 and Cash Bank_Proses Managing Cash Management_3_27.
@@ -2619,18 +2587,38 @@ if __name__ == "__main__":
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2655,26 +2643,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2684,32 +2652,52 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Receiving Bank Receipt.xml at Level 3...
     Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Receiving Bank Receipt_3_14
+    Created DataObject: Cash Bank_Proses Receiving Bank Receipt_3_18
     Created Task: Cash Bank_Proses Receiving Bank Receipt_3_6
     Created Task: Cash Bank_Proses Receiving Bank Receipt_3_7
     Created Task: Cash Bank_Proses Receiving Bank Receipt_3_10
     Created Task: Cash Bank_Proses Receiving Bank Receipt_3_21
     Created StartEvent: Cash Bank_Proses Receiving Bank Receipt_3_5
     Created EndEvent: Cash Bank_Proses Receiving Bank Receipt_3_20
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Bank Receipt_3_21 and Cash Bank_Proses Receiving Bank Receipt_3_18.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Bank Receipt_3_14 and Cash Bank_Proses Receiving Bank Receipt_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Bank Receipt_3_13 and Cash Bank_Proses Receiving Bank Receipt_3_14.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Bank Receipt_3_18 and Cash Bank_Proses Receiving Bank Receipt_3_19.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5', 'Cash Bank_Proses Receiving Bank Receipt_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21', 'Cash Bank_Proses Receiving Bank Receipt_3_20']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2734,26 +2722,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2763,32 +2731,52 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Receiving Cash Receipt.xml at Level 3...
     Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Receiving Cash Receipt_3_14
+    Created DataObject: Cash Bank_Proses Receiving Cash Receipt_3_18
     Created Task: Cash Bank_Proses Receiving Cash Receipt_3_6
     Created Task: Cash Bank_Proses Receiving Cash Receipt_3_7
     Created Task: Cash Bank_Proses Receiving Cash Receipt_3_10
     Created Task: Cash Bank_Proses Receiving Cash Receipt_3_21
     Created StartEvent: Cash Bank_Proses Receiving Cash Receipt_3_5
     Created EndEvent: Cash Bank_Proses Receiving Cash Receipt_3_20
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Cash Receipt_3_21 and Cash Bank_Proses Receiving Cash Receipt_3_18.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Cash Receipt_3_14 and Cash Bank_Proses Receiving Cash Receipt_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Cash Receipt_3_13 and Cash Bank_Proses Receiving Cash Receipt_3_14.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Cash Receipt_3_18 and Cash Bank_Proses Receiving Cash Receipt_3_19.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5', 'Cash Bank_Proses Receiving Bank Receipt_3_5', 'Cash Bank_Proses Receiving Cash Receipt_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21', 'Cash Bank_Proses Receiving Bank Receipt_3_20', 'Cash Bank_Proses Receiving Cash Receipt_3_20']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2813,26 +2801,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2842,6 +2810,9 @@ if __name__ == "__main__":
     
     Processing BPMN Cash Bank Level 3 - Proses Updating Currency Records.xml at Level 3...
     Found 7 elements, 12 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Updating Currency Records_3_11
+    Created DataObject: Cash Bank_Proses Updating Currency Records_3_14
+    Created DataObject: Cash Bank_Proses Updating Currency Records_3_23
     Created Task: Cash Bank_Proses Updating Currency Records_3_6
     Created Task: Cash Bank_Proses Updating Currency Records_3_8
     Created Task: Cash Bank_Proses Updating Currency Records_3_19
@@ -2849,28 +2820,45 @@ if __name__ == "__main__":
     Created Task: Cash Bank_Proses Updating Currency Records_3_26
     Created StartEvent: Cash Bank_Proses Updating Currency Records_3_5
     Created EndEvent: Cash Bank_Proses Updating Currency Records_3_16
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_26 and Cash Bank_Proses Updating Currency Records_3_23.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_11 and Cash Bank_Proses Updating Currency Records_3_6.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_10 and Cash Bank_Proses Updating Currency Records_3_11.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_14 and Cash Bank_Proses Updating Currency Records_3_15.
-    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_20 and Cash Bank_Proses Updating Currency Records_3_14.
     Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_23 and Cash Bank_Proses Updating Currency Records_3_24.
     
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5', 'Cash Bank_Proses Receiving Bank Receipt_3_5', 'Cash Bank_Proses Receiving Cash Receipt_3_5', 'Cash Bank_Proses Updating Currency Records_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21', 'Cash Bank_Proses Receiving Bank Receipt_3_20', 'Cash Bank_Proses Receiving Cash Receipt_3_20', 'Cash Bank_Proses Updating Currency Records_3_16']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2895,26 +2883,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -2948,18 +2916,38 @@ if __name__ == "__main__":
     Process integrity issues found:
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Updating Sales Invoice Data_3_4', 'Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5', 'Cash Bank_Proses Receiving Bank Receipt_3_5', 'Cash Bank_Proses Receiving Cash Receipt_3_5', 'Cash Bank_Proses Updating Currency Records_3_5']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
     
     Check results:
-    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Updating Sales Invoice Data_3_15', 'Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
     {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
     {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21', 'Cash Bank_Proses Receiving Bank Receipt_3_20', 'Cash Bank_Proses Receiving Cash Receipt_3_20', 'Cash Bank_Proses Updating Currency Records_3_16']}
-    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
     
     Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
@@ -2984,26 +2972,6 @@ if __name__ == "__main__":
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
     {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
-    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
     
     Check results:
     {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
@@ -3021,6 +2989,26 @@ if __name__ == "__main__":
             WHERE outgoing < 2
             RETURN n.id as node_id, 'Invalid split pattern' as issue, outgoing
             
+    {'node_id': 'invisible_task_Account Payable_2_12', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_2_15', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_2_16', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_2_42', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_2_55', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_2_67', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_2_12', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_2_15', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_2_16', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_2_42', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_2_55', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_2_67', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Asset Management_2_19', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Asset Management_2_22', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Asset Management_2_23', 'issue': 'Invalid split pattern', 'outgoing': 1}
@@ -3045,6 +3033,2347 @@ if __name__ == "__main__":
     {'node_id': 'invisible_task_Cash Bank_2_88', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Cash Bank_2_109', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Cash Bank_2_111', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    
+    Issue type: 
+            MATCH p=(n)-[r:XOR_JOIN|OR_JOIN]->(m)
+            WITH m, count(r) as incoming
+            WHERE incoming < 2
+            RETURN m.id as node_id, 'Invalid join pattern' as issue, incoming
+            
+    {'node_id': 'invisible_task_Asset Management_Asset Category Process_3_23', 'issue': 'Invalid join pattern', 'incoming': 1}
+    {'node_id': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'issue': 'Invalid join pattern', 'incoming': 1}
+    {'node_id': 'invisible_task_Asset Management_Asset Transfer_3_23', 'issue': 'Invalid join pattern', 'incoming': 1}
+    {'node_id': 'invisible_task_Asset Management_Fiscal Type_3_23', 'issue': 'Invalid join pattern', 'incoming': 1}
+    
+    Issue type: 
+            MATCH (s:StartEvent)
+            WITH s.level as level, s.module as module, count(s) as start_count
+            WHERE start_count > 1
+            RETURN level, module, start_count, 'Multiple start events' as issue
+            
+    {'level': 3, 'module': 'Account Payable', 'start_count': 8, 'issue': 'Multiple start events'}
+    {'level': 3, 'module': 'Account Receivable', 'start_count': 8, 'issue': 'Multiple start events'}
+    {'level': 3, 'module': 'Asset Management', 'start_count': 4, 'issue': 'Multiple start events'}
+    {'level': 3, 'module': 'Cash Bank', 'start_count': 10, 'issue': 'Multiple start events'}
+    
+    Issue type: 
+            MATCH (e:EndEvent)
+            WITH e.level as level, e.module as module, count(e) as end_count
+            WHERE end_count > 1
+            RETURN level, module, end_count, 'Multiple end events' as issue
+            
+    {'level': 3, 'module': 'Account Payable', 'end_count': 8, 'issue': 'Multiple end events'}
+    {'level': 3, 'module': 'Account Receivable', 'end_count': 8, 'issue': 'Multiple end events'}
+    {'level': 3, 'module': 'Asset Management', 'end_count': 4, 'issue': 'Multiple end events'}
+    {'level': 3, 'module': 'Cash Bank', 'end_count': 10, 'issue': 'Multiple end events'}
+    
+
+
+```python
+def verify_data_import():
+    with driver.session(database="erpbpmn") as session:
+        result = session.run("MATCH (n) RETURN labels(n) AS Label, count(n) AS Count ORDER BY Count DESC")
+        print("Node counts by label:")
+        for record in result:
+            print(f"{record['Label']}: {record['Count']}")
+
+        result = session.run("MATCH ()-[r]->() RETURN type(r) AS RelationType, count(r) AS Count ORDER BY Count DESC")
+        print("\nRelationship counts by type:")
+        for record in result:
+            print(f"{record['RelationType']}: {record['Count']}")
+
+        result = session.run("MATCH (n) RETURN n.level AS Level, count(n) AS Count ORDER BY Level")
+        print("\nNode counts by level:")
+        for record in result:
+            print(f"Level {record['Level']}: {record['Count']} nodes")
+```
+
+# 7. Execute Main Function
+
+
+```python
+def run():
+    main()
+    verify_data_import()
+
+if __name__ == "__main__":
+    run()
+```
+
+    
+    Processing BPMN Account Payable Level 1.xml at Level 1...
+    Found 3 elements, 2 flows, and 0 gateways
+    Created Task: Account Payable_1_5
+    Created StartEvent: Account Payable_1_3
+    Created EndEvent: Account Payable_1_7
+    
+    Processing BPMN Account Payable Level 2.xml at Level 2...
+    Found 23 elements, 39 flows, and 11 gateways
+    Created Task: Account Payable_2_24
+    Created Task: Account Payable_2_25
+    Created Task: Account Payable_2_26
+    Created Task: Account Payable_2_28
+    Created Task: Account Payable_2_29
+    Created Task: Account Payable_2_30
+    Created Task: Account Payable_2_31
+    Created Task: Account Payable_2_32
+    Created Task: Account Payable_2_33
+    Created Task: Account Payable_2_43
+    Created Task: Account Payable_2_46
+    Created Task: Account Payable_2_48
+    Created Task: Account Payable_2_50
+    Created Task: Account Payable_2_52
+    Created Task: Account Payable_2_57
+    Created Task: Account Payable_2_64
+    Created Task: Account Payable_2_65
+    Created Task: Account Payable_2_68
+    Created Task: Account Payable_2_72
+    Created Task: Account Payable_2_76
+    Created Task: Account Payable_2_78
+    Created StartEvent: Account Payable_2_80
+    Created EndEvent: Account Payable_2_22
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_2_81 and invisible_task_Account Payable_2_12.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_2_12 and Account Payable_2_15.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_2_12 and invisible_task_Account Payable_2_15.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_2_15 and Account Payable_2_16.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_2_15 and invisible_task_Account Payable_2_16.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_2_16 and Account Payable_2_18.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_2_81 and invisible_task_Account Payable_2_42.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_2_42 and Account Payable_2_45.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_2_55 and Account Payable_2_60.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_2_67 and Account Payable_2_73.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_2_81 and Account Payable_2_12.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_2_81 and Account Payable_2_42.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    
+    Processing BPMN Account Payable Level 3 - Creating the Purchase DP Invoice.xml at Level 3...
+    Found 8 elements, 17 flows, and 3 gateways
+    Created DataObject: Account Payable_Creating the Purchase DP Invoice_3_22
+    Created DataObject: Account Payable_Creating the Purchase DP Invoice_3_26
+    Created DataObject: Account Payable_Creating the Purchase DP Invoice_3_32
+    Created Task: Account Payable_Creating the Purchase DP Invoice_3_5
+    Created Task: Account Payable_Creating the Purchase DP Invoice_3_6
+    Created Task: Account Payable_Creating the Purchase DP Invoice_3_14
+    Created Task: Account Payable_Creating the Purchase DP Invoice_3_16
+    Created Task: Account Payable_Creating the Purchase DP Invoice_3_29
+    Created Task: Account Payable_Creating the Purchase DP Invoice_3_30
+    Created StartEvent: Account Payable_Creating the Purchase DP Invoice_3_4
+    Created EndEvent: Account Payable_Creating the Purchase DP Invoice_3_35
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_21 and Account Payable_Creating the Purchase DP Invoice_3_22.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_24 and Account Payable_Creating the Purchase DP Invoice_3_26.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase DP Invoice_3_32 and Account Payable_Creating the Purchase DP Invoice_3_34.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11 and Account Payable_Creating the Purchase DP Invoice_3_17.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    
+    Processing BPMN Account Payable Level 3 - Creating the Purchase Invoice.xml at Level 3...
+    Found 8 elements, 17 flows, and 3 gateways
+    Created DataObject: Account Payable_Creating the Purchase Invoice_3_22
+    Created DataObject: Account Payable_Creating the Purchase Invoice_3_26
+    Created DataObject: Account Payable_Creating the Purchase Invoice_3_32
+    Created Task: Account Payable_Creating the Purchase Invoice_3_5
+    Created Task: Account Payable_Creating the Purchase Invoice_3_6
+    Created Task: Account Payable_Creating the Purchase Invoice_3_14
+    Created Task: Account Payable_Creating the Purchase Invoice_3_16
+    Created Task: Account Payable_Creating the Purchase Invoice_3_29
+    Created Task: Account Payable_Creating the Purchase Invoice_3_30
+    Created StartEvent: Account Payable_Creating the Purchase Invoice_3_4
+    Created EndEvent: Account Payable_Creating the Purchase Invoice_3_35
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_21 and Account Payable_Creating the Purchase Invoice_3_22.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_24 and Account Payable_Creating the Purchase Invoice_3_26.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Creating the Purchase Invoice_3_32 and Account Payable_Creating the Purchase Invoice_3_34.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_Creating the Purchase Invoice_3_11 and Account Payable_Creating the Purchase Invoice_3_17.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    
+    Processing BPMN Account Payable Level 3 - Finalizing Purchase DP Invoice Document.xml at Level 3...
+    Found 5 elements, 8 flows, and 0 gateways
+    Created DataObject: Account Payable_Finalizing Purchase DP Invoice Document_3_10
+    Created DataObject: Account Payable_Finalizing Purchase DP Invoice Document_3_13
+    Created Task: Account Payable_Finalizing Purchase DP Invoice Document_3_5
+    Created Task: Account Payable_Finalizing Purchase DP Invoice Document_3_7
+    Created Task: Account Payable_Finalizing Purchase DP Invoice Document_3_17
+    Created StartEvent: Account Payable_Finalizing Purchase DP Invoice Document_3_4
+    Created EndEvent: Account Payable_Finalizing Purchase DP Invoice Document_3_15
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase DP Invoice Document_3_9 and Account Payable_Finalizing Purchase DP Invoice Document_3_10.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase DP Invoice Document_3_13 and Account Payable_Finalizing Purchase DP Invoice Document_3_14.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    
+    Processing BPMN Account Payable Level 3 - Finalizing Purchase Invoice Document.xml at Level 3...
+    Found 5 elements, 8 flows, and 0 gateways
+    Created DataObject: Account Payable_Finalizing Purchase Invoice Document_3_10
+    Created DataObject: Account Payable_Finalizing Purchase Invoice Document_3_13
+    Created Task: Account Payable_Finalizing Purchase Invoice Document_3_5
+    Created Task: Account Payable_Finalizing Purchase Invoice Document_3_7
+    Created Task: Account Payable_Finalizing Purchase Invoice Document_3_17
+    Created StartEvent: Account Payable_Finalizing Purchase Invoice Document_3_4
+    Created EndEvent: Account Payable_Finalizing Purchase Invoice Document_3_15
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase Invoice Document_3_9 and Account Payable_Finalizing Purchase Invoice Document_3_10.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Finalizing Purchase Invoice Document_3_13 and Account Payable_Finalizing Purchase Invoice Document_3_14.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    
+    Processing BPMN Account Payable Level 3 - Reviewing Purchase DP Invoice.xml at Level 3...
+    Found 6 elements, 13 flows, and 3 gateways
+    Created DataObject: Account Payable_Reviewing Purchase DP Invoice_3_9
+    Created DataObject: Account Payable_Reviewing Purchase DP Invoice_3_12
+    Created Task: Account Payable_Reviewing Purchase DP Invoice_3_5
+    Created Task: Account Payable_Reviewing Purchase DP Invoice_3_6
+    Created Task: Account Payable_Reviewing Purchase DP Invoice_3_16
+    Created Task: Account Payable_Reviewing Purchase DP Invoice_3_23
+    Created StartEvent: Account Payable_Reviewing Purchase DP Invoice_3_4
+    Created EndEvent: Account Payable_Reviewing Purchase DP Invoice_3_14
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase DP Invoice_3_8 and Account Payable_Reviewing Purchase DP Invoice_3_9.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase DP Invoice_3_12 and Account Payable_Reviewing Purchase DP Invoice_3_13.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19 and Account Payable_Reviewing Purchase DP Invoice_3_20.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Account Payable Level 3 - Reviewing Purchase Invoice.xml at Level 3...
+    Found 6 elements, 13 flows, and 3 gateways
+    Created DataObject: Account Payable_Reviewing Purchase Invoice_3_9
+    Created DataObject: Account Payable_Reviewing Purchase Invoice_3_12
+    Created Task: Account Payable_Reviewing Purchase Invoice_3_5
+    Created Task: Account Payable_Reviewing Purchase Invoice_3_6
+    Created Task: Account Payable_Reviewing Purchase Invoice_3_16
+    Created Task: Account Payable_Reviewing Purchase Invoice_3_23
+    Created StartEvent: Account Payable_Reviewing Purchase Invoice_3_4
+    Created EndEvent: Account Payable_Reviewing Purchase Invoice_3_14
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase Invoice_3_8 and Account Payable_Reviewing Purchase Invoice_3_9.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Reviewing Purchase Invoice_3_12 and Account Payable_Reviewing Purchase Invoice_3_13.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Payable_Reviewing Purchase Invoice_3_19 and Account Payable_Reviewing Purchase Invoice_3_20.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Account Payable Level 3 - Updating Purchase DP Invoice Data.xml at Level 3...
+    Found 4 elements, 7 flows, and 0 gateways
+    Created DataObject: Account Payable_Updating Purchase DP Invoice Data_3_10
+    Created DataObject: Account Payable_Updating Purchase DP Invoice Data_3_13
+    Created Task: Account Payable_Updating Purchase DP Invoice Data_3_5
+    Created Task: Account Payable_Updating Purchase DP Invoice Data_3_7
+    Created StartEvent: Account Payable_Updating Purchase DP Invoice Data_3_4
+    Created EndEvent: Account Payable_Updating Purchase DP Invoice Data_3_15
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase DP Invoice Data_3_9 and Account Payable_Updating Purchase DP Invoice Data_3_10.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase DP Invoice Data_3_13 and Account Payable_Updating Purchase DP Invoice Data_3_14.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Account Payable Level 3 - Updating Purchase Invoice Data.xml at Level 3...
+    Found 4 elements, 7 flows, and 0 gateways
+    Created DataObject: Account Payable_Updating Purchase Invoice Data_3_10
+    Created DataObject: Account Payable_Updating Purchase Invoice Data_3_13
+    Created Task: Account Payable_Updating Purchase Invoice Data_3_5
+    Created Task: Account Payable_Updating Purchase Invoice Data_3_7
+    Created StartEvent: Account Payable_Updating Purchase Invoice Data_3_4
+    Created EndEvent: Account Payable_Updating Purchase Invoice Data_3_15
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase Invoice Data_3_9 and Account Payable_Updating Purchase Invoice Data_3_10.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Payable_Updating Purchase Invoice Data_3_13 and Account Payable_Updating Purchase Invoice Data_3_14.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 1.xml at Level 1...
+    Found 3 elements, 2 flows, and 0 gateways
+    Created Task: Account Receivable_1_5
+    Created StartEvent: Account Receivable_1_3
+    Created EndEvent: Account Receivable_1_7
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 2.xml at Level 2...
+    Found 23 elements, 39 flows, and 11 gateways
+    Created Task: Account Receivable_2_24
+    Created Task: Account Receivable_2_25
+    Created Task: Account Receivable_2_26
+    Created Task: Account Receivable_2_28
+    Created Task: Account Receivable_2_29
+    Created Task: Account Receivable_2_30
+    Created Task: Account Receivable_2_31
+    Created Task: Account Receivable_2_32
+    Created Task: Account Receivable_2_33
+    Created Task: Account Receivable_2_43
+    Created Task: Account Receivable_2_46
+    Created Task: Account Receivable_2_48
+    Created Task: Account Receivable_2_50
+    Created Task: Account Receivable_2_52
+    Created Task: Account Receivable_2_57
+    Created Task: Account Receivable_2_64
+    Created Task: Account Receivable_2_65
+    Created Task: Account Receivable_2_68
+    Created Task: Account Receivable_2_72
+    Created Task: Account Receivable_2_76
+    Created Task: Account Receivable_2_78
+    Created StartEvent: Account Receivable_2_80
+    Created EndEvent: Account Receivable_2_22
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_2_81 and invisible_task_Account Receivable_2_12.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_2_12 and Account Receivable_2_15.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_2_12 and invisible_task_Account Receivable_2_15.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_2_15 and Account Receivable_2_16.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_2_15 and invisible_task_Account Receivable_2_16.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_2_16 and Account Receivable_2_18.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_2_81 and invisible_task_Account Receivable_2_42.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_2_42 and Account Receivable_2_45.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_2_55 and Account Receivable_2_60.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_2_67 and Account Receivable_2_73.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_2_81 and Account Receivable_2_12.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_2_81 and Account Receivable_2_42.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 3 - Creating the Sales DP Invoice.xml at Level 3...
+    Found 8 elements, 17 flows, and 3 gateways
+    Created DataObject: Account Receivable_Creating the Sales DP Invoice_3_22
+    Created DataObject: Account Receivable_Creating the Sales DP Invoice_3_26
+    Created DataObject: Account Receivable_Creating the Sales DP Invoice_3_32
+    Created Task: Account Receivable_Creating the Sales DP Invoice_3_5
+    Created Task: Account Receivable_Creating the Sales DP Invoice_3_6
+    Created Task: Account Receivable_Creating the Sales DP Invoice_3_14
+    Created Task: Account Receivable_Creating the Sales DP Invoice_3_16
+    Created Task: Account Receivable_Creating the Sales DP Invoice_3_29
+    Created Task: Account Receivable_Creating the Sales DP Invoice_3_30
+    Created StartEvent: Account Receivable_Creating the Sales DP Invoice_3_4
+    Created EndEvent: Account Receivable_Creating the Sales DP Invoice_3_35
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_21 and Account Receivable_Creating the Sales DP Invoice_3_22.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_24 and Account Receivable_Creating the Sales DP Invoice_3_26.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales DP Invoice_3_32 and Account Receivable_Creating the Sales DP Invoice_3_34.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11 and Account Receivable_Creating the Sales DP Invoice_3_17.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 3 - Creating the Sales Invoice.xml at Level 3...
+    Found 8 elements, 17 flows, and 3 gateways
+    Created DataObject: Account Receivable_Creating the Sales Invoice_3_22
+    Created DataObject: Account Receivable_Creating the Sales Invoice_3_26
+    Created DataObject: Account Receivable_Creating the Sales Invoice_3_32
+    Created Task: Account Receivable_Creating the Sales Invoice_3_5
+    Created Task: Account Receivable_Creating the Sales Invoice_3_6
+    Created Task: Account Receivable_Creating the Sales Invoice_3_14
+    Created Task: Account Receivable_Creating the Sales Invoice_3_16
+    Created Task: Account Receivable_Creating the Sales Invoice_3_29
+    Created Task: Account Receivable_Creating the Sales Invoice_3_30
+    Created StartEvent: Account Receivable_Creating the Sales Invoice_3_4
+    Created EndEvent: Account Receivable_Creating the Sales Invoice_3_35
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_21 and Account Receivable_Creating the Sales Invoice_3_22.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_24 and Account Receivable_Creating the Sales Invoice_3_26.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Creating the Sales Invoice_3_32 and Account Receivable_Creating the Sales Invoice_3_34.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_Creating the Sales Invoice_3_11 and Account Receivable_Creating the Sales Invoice_3_17.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 3 - Finalizing Sales DP Invoice Document.xml at Level 3...
+    Found 5 elements, 8 flows, and 0 gateways
+    Created DataObject: Account Receivable_Finalizing Sales DP Invoice Document_3_10
+    Created DataObject: Account Receivable_Finalizing Sales DP Invoice Document_3_13
+    Created Task: Account Receivable_Finalizing Sales DP Invoice Document_3_5
+    Created Task: Account Receivable_Finalizing Sales DP Invoice Document_3_7
+    Created Task: Account Receivable_Finalizing Sales DP Invoice Document_3_17
+    Created StartEvent: Account Receivable_Finalizing Sales DP Invoice Document_3_4
+    Created EndEvent: Account Receivable_Finalizing Sales DP Invoice Document_3_15
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales DP Invoice Document_3_9 and Account Receivable_Finalizing Sales DP Invoice Document_3_10.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales DP Invoice Document_3_13 and Account Receivable_Finalizing Sales DP Invoice Document_3_14.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 3 - Finalizing Sales Invoice Document.xml at Level 3...
+    Found 5 elements, 8 flows, and 0 gateways
+    Created DataObject: Account Receivable_Finalizing Sales Invoice Document_3_10
+    Created DataObject: Account Receivable_Finalizing Sales Invoice Document_3_13
+    Created Task: Account Receivable_Finalizing Sales Invoice Document_3_5
+    Created Task: Account Receivable_Finalizing Sales Invoice Document_3_7
+    Created Task: Account Receivable_Finalizing Sales Invoice Document_3_17
+    Created StartEvent: Account Receivable_Finalizing Sales Invoice Document_3_4
+    Created EndEvent: Account Receivable_Finalizing Sales Invoice Document_3_15
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales Invoice Document_3_9 and Account Receivable_Finalizing Sales Invoice Document_3_10.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Finalizing Sales Invoice Document_3_13 and Account Receivable_Finalizing Sales Invoice Document_3_14.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 3 - Reviewing Sales DP Invoice.xml at Level 3...
+    Found 6 elements, 13 flows, and 3 gateways
+    Created DataObject: Account Receivable_Reviewing Sales DP Invoice_3_9
+    Created DataObject: Account Receivable_Reviewing Sales DP Invoice_3_12
+    Created Task: Account Receivable_Reviewing Sales DP Invoice_3_5
+    Created Task: Account Receivable_Reviewing Sales DP Invoice_3_6
+    Created Task: Account Receivable_Reviewing Sales DP Invoice_3_16
+    Created Task: Account Receivable_Reviewing Sales DP Invoice_3_23
+    Created StartEvent: Account Receivable_Reviewing Sales DP Invoice_3_4
+    Created EndEvent: Account Receivable_Reviewing Sales DP Invoice_3_14
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales DP Invoice_3_8 and Account Receivable_Reviewing Sales DP Invoice_3_9.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales DP Invoice_3_12 and Account Receivable_Reviewing Sales DP Invoice_3_13.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19 and Account Receivable_Reviewing Sales DP Invoice_3_20.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 3 - Reviewing Sales Invoice.xml at Level 3...
+    Found 6 elements, 13 flows, and 3 gateways
+    Created DataObject: Account Receivable_Reviewing Sales Invoice_3_9
+    Created DataObject: Account Receivable_Reviewing Sales Invoice_3_12
+    Created Task: Account Receivable_Reviewing Sales Invoice_3_5
+    Created Task: Account Receivable_Reviewing Sales Invoice_3_6
+    Created Task: Account Receivable_Reviewing Sales Invoice_3_16
+    Created Task: Account Receivable_Reviewing Sales Invoice_3_23
+    Created StartEvent: Account Receivable_Reviewing Sales Invoice_3_4
+    Created EndEvent: Account Receivable_Reviewing Sales Invoice_3_14
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales Invoice_3_8 and Account Receivable_Reviewing Sales Invoice_3_9.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Reviewing Sales Invoice_3_12 and Account Receivable_Reviewing Sales Invoice_3_13.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Account Receivable_Reviewing Sales Invoice_3_19 and Account Receivable_Reviewing Sales Invoice_3_20.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 3 - Updating Sales DP Invoice Data.xml at Level 3...
+    Found 4 elements, 7 flows, and 0 gateways
+    Created DataObject: Account Receivable_Updating Sales DP Invoice Data_3_10
+    Created DataObject: Account Receivable_Updating Sales DP Invoice Data_3_13
+    Created Task: Account Receivable_Updating Sales DP Invoice Data_3_5
+    Created Task: Account Receivable_Updating Sales DP Invoice Data_3_7
+    Created StartEvent: Account Receivable_Updating Sales DP Invoice Data_3_4
+    Created EndEvent: Account Receivable_Updating Sales DP Invoice Data_3_15
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales DP Invoice Data_3_9 and Account Receivable_Updating Sales DP Invoice Data_3_10.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales DP Invoice Data_3_13 and Account Receivable_Updating Sales DP Invoice Data_3_14.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Account Receivable Level 3 - Updating Sales Invoice Data.xml at Level 3...
+    Found 4 elements, 7 flows, and 0 gateways
+    Created DataObject: Account Receivable_Updating Sales Invoice Data_3_10
+    Created DataObject: Account Receivable_Updating Sales Invoice Data_3_13
+    Created Task: Account Receivable_Updating Sales Invoice Data_3_5
+    Created Task: Account Receivable_Updating Sales Invoice Data_3_7
+    Created StartEvent: Account Receivable_Updating Sales Invoice Data_3_4
+    Created EndEvent: Account Receivable_Updating Sales Invoice Data_3_15
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales Invoice Data_3_9 and Account Receivable_Updating Sales Invoice Data_3_10.
+    Warning: Could not create relationship SEQUENCE_FLOW between Account Receivable_Updating Sales Invoice Data_3_13 and Account Receivable_Updating Sales Invoice Data_3_14.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Asset Management Level 1.xml at Level 1...
+    Found 3 elements, 2 flows, and 0 gateways
+    Created Task: Asset Management_1_4
+    Created StartEvent: Asset Management_1_3
+    Created EndEvent: Asset Management_1_6
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    
+    Processing BPMN Asset Management Level 2.xml at Level 2...
+    Found 28 elements, 55 flows, and 15 gateways
+    Created Task: Asset Management_2_34
+    Created Task: Asset Management_2_35
+    Created Task: Asset Management_2_36
+    Created Task: Asset Management_2_37
+    Created Task: Asset Management_2_38
+    Created Task: Asset Management_2_39
+    Created Task: Asset Management_2_41
+    Created Task: Asset Management_2_60
+    Created Task: Asset Management_2_64
+    Created Task: Asset Management_2_69
+    Created Task: Asset Management_2_72
+    Created Task: Asset Management_2_73
+    Created Task: Asset Management_2_74
+    Created Task: Asset Management_2_75
+    Created Task: Asset Management_2_76
+    Created Task: Asset Management_2_79
+    Created Task: Asset Management_2_81
+    Created Task: Asset Management_2_83
+    Created Task: Asset Management_2_85
+    Created Task: Asset Management_2_89
+    Created Task: Asset Management_2_91
+    Created Task: Asset Management_2_92
+    Created Task: Asset Management_2_93
+    Created Task: Asset Management_2_95
+    Created Task: Asset Management_2_99
+    Created Task: Asset Management_2_102
+    Created StartEvent: Asset Management_2_2
+    Created EndEvent: Asset Management_2_48
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_4 and Asset Management_2_51.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_4 and Asset Management_2_19.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_4 and invisible_task_Asset Management_2_19.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_19 and Asset Management_2_22.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_19 and invisible_task_Asset Management_2_22.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_22 and Asset Management_2_23.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_22 and invisible_task_Asset Management_2_23.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_23 and Asset Management_2_27.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_23 and invisible_task_Asset Management_2_27.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_27 and Asset Management_2_30.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_27 and invisible_task_Asset Management_2_30.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_30 and Asset Management_2_32.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_4 and invisible_task_Asset Management_2_51.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_51 and Asset Management_2_62.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_66 and invisible_task_Asset Management_2_54.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_54 and Asset Management_2_56.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_54 and invisible_task_Asset Management_2_56.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_56 and Asset Management_2_58.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_56 and invisible_task_Asset Management_2_58.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_58 and Asset Management_2_97.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_51 and invisible_task_Asset Management_2_62.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_62 and Asset Management_2_66.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_62 and invisible_task_Asset Management_2_66.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_66 and Asset Management_2_54.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_2_58 and invisible_task_Asset Management_2_97.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_2_97 and Asset Management_2_100.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    
+    Processing BPMN Asset Management Level 3 - Asset Category Process.xml at Level 3...
+    Found 10 elements, 25 flows, and 4 gateways
+    Created DataObject: Asset Management_Asset Category Process_3_13
+    Created DataObject: Asset Management_Asset Category Process_3_27
+    Created DataObject: Asset Management_Asset Category Process_3_35
+    Created DataObject: Asset Management_Asset Category Process_3_43
+    Created Task: Asset Management_Asset Category Process_3_5
+    Created Task: Asset Management_Asset Category Process_3_7
+    Created Task: Asset Management_Asset Category Process_3_10
+    Created Task: Asset Management_Asset Category Process_3_18
+    Created Task: Asset Management_Asset Category Process_3_30
+    Created Task: Asset Management_Asset Category Process_3_33
+    Created Task: Asset Management_Asset Category Process_3_37
+    Created Task: Asset Management_Asset Category Process_3_40
+    Created StartEvent: Asset Management_Asset Category Process_3_4
+    Created EndEvent: Asset Management_Asset Category Process_3_11
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_12 and Asset Management_Asset Category Process_3_40.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_12 and Asset Management_Asset Category Process_3_27.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_43 and Asset Management_Asset Category Process_3_12.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_35 and Asset Management_Asset Category Process_3_12.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Category Process_3_13 and Asset Management_Asset Category Process_3_12.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Asset Category Process_3_20 and Asset Management_Asset Category Process_3_23.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Category Process_3_20 and invisible_task_Asset Management_Asset Category Process_3_23.
+    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Asset Category Process_3_23 and Asset Management_Asset Category Process_3_45.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    
+    Processing BPMN Asset Management Level 3 - Asset Management Registration Process.xml at Level 3...
+    Found 9 elements, 27 flows, and 4 gateways
+    Created DataObject: Asset Management_Asset Management Registration Process_3_7
+    Created DataObject: Asset Management_Asset Management Registration Process_3_14
+    Created DataObject: Asset Management_Asset Management Registration Process_3_23
+    Created DataObject: Asset Management_Asset Management Registration Process_3_38
+    Created DataObject: Asset Management_Asset Management Registration Process_3_47
+    Created DataObject: Asset Management_Asset Management Registration Process_3_53
+    Created Task: Asset Management_Asset Management Registration Process_3_5
+    Created Task: Asset Management_Asset Management Registration Process_3_11
+    Created Task: Asset Management_Asset Management Registration Process_3_19
+    Created Task: Asset Management_Asset Management Registration Process_3_28
+    Created Task: Asset Management_Asset Management Registration Process_3_41
+    Created Task: Asset Management_Asset Management Registration Process_3_44
+    Created Task: Asset Management_Asset Management Registration Process_3_50
+    Created StartEvent: Asset Management_Asset Management Registration Process_3_4
+    Created EndEvent: Asset Management_Asset Management Registration Process_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_23 and Asset Management_Asset Management Registration Process_3_21.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_21 and Asset Management_Asset Management Registration Process_3_38.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Management Registration Process_3_47 and Asset Management_Asset Management Registration Process_3_21.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Asset Management Registration Process_3_30 and Asset Management_Asset Management Registration Process_3_33.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Management Registration Process_3_30 and invisible_task_Asset Management_Asset Management Registration Process_3_33.
+    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Asset Management Registration Process_3_33 and Asset Management_Asset Management Registration Process_3_37.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Management Registration Process_3_33 and invisible_task_Asset Management_Asset Management Registration Process_3_37.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    
+    Processing BPMN Asset Management Level 3 - Asset Transfer.xml at Level 3...
+    Found 9 elements, 22 flows, and 4 gateways
+    Created DataObject: Asset Management_Asset Transfer_3_13
+    Created DataObject: Asset Management_Asset Transfer_3_28
+    Created DataObject: Asset Management_Asset Transfer_3_36
+    Created DataObject: Asset Management_Asset Transfer_3_42
+    Created Task: Asset Management_Asset Transfer_3_4
+    Created Task: Asset Management_Asset Transfer_3_6
+    Created Task: Asset Management_Asset Transfer_3_9
+    Created Task: Asset Management_Asset Transfer_3_18
+    Created Task: Asset Management_Asset Transfer_3_31
+    Created Task: Asset Management_Asset Transfer_3_34
+    Created Task: Asset Management_Asset Transfer_3_38
+    Created StartEvent: Asset Management_Asset Transfer_3_3
+    Created EndEvent: Asset Management_Asset Transfer_3_10
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_13 and Asset Management_Asset Transfer_3_11.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_11 and Asset Management_Asset Transfer_3_28.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Asset Transfer_3_36 and Asset Management_Asset Transfer_3_11.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Asset Transfer_3_20 and Asset Management_Asset Transfer_3_23.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Transfer_3_20 and invisible_task_Asset Management_Asset Transfer_3_23.
+    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Asset Transfer_3_23 and Asset Management_Asset Transfer_3_27.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Asset Transfer_3_23 and invisible_task_Asset Management_Asset Transfer_3_27.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    
+    Processing BPMN Asset Management Level 3 - Fiscal Type.xml at Level 3...
+    Found 10 elements, 25 flows, and 4 gateways
+    Created DataObject: Asset Management_Fiscal Type_3_13
+    Created DataObject: Asset Management_Fiscal Type_3_28
+    Created DataObject: Asset Management_Fiscal Type_3_36
+    Created DataObject: Asset Management_Fiscal Type_3_43
+    Created Task: Asset Management_Fiscal Type_3_4
+    Created Task: Asset Management_Fiscal Type_3_6
+    Created Task: Asset Management_Fiscal Type_3_9
+    Created Task: Asset Management_Fiscal Type_3_18
+    Created Task: Asset Management_Fiscal Type_3_31
+    Created Task: Asset Management_Fiscal Type_3_34
+    Created Task: Asset Management_Fiscal Type_3_38
+    Created Task: Asset Management_Fiscal Type_3_40
+    Created StartEvent: Asset Management_Fiscal Type_3_3
+    Created EndEvent: Asset Management_Fiscal Type_3_10
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_13 and Asset Management_Fiscal Type_3_11.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_11 and Asset Management_Fiscal Type_3_28.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_43 and Asset Management_Fiscal Type_3_11.
+    Warning: Could not create relationship SEQUENCE_FLOW between Asset Management_Fiscal Type_3_36 and Asset Management_Fiscal Type_3_11.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Asset Management_Fiscal Type_3_20 and Asset Management_Fiscal Type_3_23.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Fiscal Type_3_20 and invisible_task_Asset Management_Fiscal Type_3_23.
+    Warning: Could not create relationship SEQUENCE_FLOW between invisible_task_Asset Management_Fiscal Type_3_23 and Asset Management_Fiscal Type_3_27.
+    Warning: Could not create relationship XOR_JOIN between Asset Management_Fiscal Type_3_23 and invisible_task_Asset Management_Fiscal Type_3_27.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 1.xml at Level 1...
+    Found 3 elements, 2 flows, and 0 gateways
+    Created Task: Cash Bank_1_5
+    Created StartEvent: Cash Bank_1_3
+    Created EndEvent: Cash Bank_1_7
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 2.xml at Level 2...
+    Found 35 elements, 63 flows, and 22 gateways
+    Created Task: Cash Bank_2_22
+    Created Task: Cash Bank_2_24
+    Created Task: Cash Bank_2_32
+    Created Task: Cash Bank_2_34
+    Created Task: Cash Bank_2_35
+    Created Task: Cash Bank_2_37
+    Created Task: Cash Bank_2_45
+    Created Task: Cash Bank_2_47
+    Created Task: Cash Bank_2_48
+    Created Task: Cash Bank_2_49
+    Created Task: Cash Bank_2_56
+    Created Task: Cash Bank_2_63
+    Created Task: Cash Bank_2_71
+    Created Task: Cash Bank_2_72
+    Created Task: Cash Bank_2_74
+    Created Task: Cash Bank_2_75
+    Created Task: Cash Bank_2_77
+    Created Task: Cash Bank_2_78
+    Created Task: Cash Bank_2_80
+    Created Task: Cash Bank_2_82
+    Created Task: Cash Bank_2_84
+    Created Task: Cash Bank_2_91
+    Created Task: Cash Bank_2_95
+    Created Task: Cash Bank_2_98
+    Created Task: Cash Bank_2_100
+    Created Task: Cash Bank_2_101
+    Created Task: Cash Bank_2_103
+    Created Task: Cash Bank_2_104
+    Created Task: Cash Bank_2_106
+    Created Task: Cash Bank_2_108
+    Created Task: Cash Bank_2_114
+    Created Task: Cash Bank_2_118
+    Created Task: Cash Bank_2_129
+    Created StartEvent: Cash Bank_2_125
+    Created EndEvent: Cash Bank_2_19
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_2_126 and invisible_task_Cash Bank_2_13.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_13 and Cash Bank_2_16.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_2_30 and invisible_task_Cash Bank_2_27.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_27 and Cash Bank_2_58.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_2_43 and invisible_task_Cash Bank_2_40.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_40 and Cash Bank_2_51.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_2_69 and invisible_task_Cash Bank_2_70.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_70 and Cash Bank_2_122.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_86 and Cash Bank_2_88.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_2_86 and invisible_task_Cash Bank_2_88.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_88 and Cash Bank_2_90.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_109 and Cash Bank_2_111.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_2_109 and invisible_task_Cash Bank_2_111.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_111 and Cash Bank_2_113.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_126 and Cash Bank_2_13.
+    Warning: Could not create relationship XOR_SPLIT between invisible_task_Cash Bank_2_126 and Cash Bank_2_69.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Managing Currency Exchange.xml at Level 3...
+    Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Managing Currency Exchange_3_14
+    Created DataObject: Cash Bank_Managing Currency Exchange_3_18
+    Created Task: Cash Bank_Managing Currency Exchange_3_6
+    Created Task: Cash Bank_Managing Currency Exchange_3_7
+    Created Task: Cash Bank_Managing Currency Exchange_3_10
+    Created Task: Cash Bank_Managing Currency Exchange_3_21
+    Created StartEvent: Cash Bank_Managing Currency Exchange_3_5
+    Created EndEvent: Cash Bank_Managing Currency Exchange_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Managing Currency Exchange_3_13 and Cash Bank_Managing Currency Exchange_3_14.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Managing Currency Exchange_3_18 and Cash Bank_Managing Currency Exchange_3_19.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Disbursing Bank Payment.xml at Level 3...
+    Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Disbursing Bank Payment_3_14
+    Created DataObject: Cash Bank_Proses Disbursing Bank Payment_3_18
+    Created Task: Cash Bank_Proses Disbursing Bank Payment_3_6
+    Created Task: Cash Bank_Proses Disbursing Bank Payment_3_7
+    Created Task: Cash Bank_Proses Disbursing Bank Payment_3_10
+    Created Task: Cash Bank_Proses Disbursing Bank Payment_3_21
+    Created StartEvent: Cash Bank_Proses Disbursing Bank Payment_3_5
+    Created EndEvent: Cash Bank_Proses Disbursing Bank Payment_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Bank Payment_3_13 and Cash Bank_Proses Disbursing Bank Payment_3_14.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Bank Payment_3_18 and Cash Bank_Proses Disbursing Bank Payment_3_19.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Disbursing Cash Payment.xml at Level 3...
+    Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Disbursing Cash Payment_3_14
+    Created DataObject: Cash Bank_Proses Disbursing Cash Payment_3_18
+    Created Task: Cash Bank_Proses Disbursing Cash Payment_3_6
+    Created Task: Cash Bank_Proses Disbursing Cash Payment_3_7
+    Created Task: Cash Bank_Proses Disbursing Cash Payment_3_10
+    Created Task: Cash Bank_Proses Disbursing Cash Payment_3_21
+    Created StartEvent: Cash Bank_Proses Disbursing Cash Payment_3_5
+    Created EndEvent: Cash Bank_Proses Disbursing Cash Payment_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Cash Payment_3_13 and Cash Bank_Proses Disbursing Cash Payment_3_14.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Disbursing Cash Payment_3_18 and Cash Bank_Proses Disbursing Cash Payment_3_19.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Managing Bank Account.xml at Level 3...
+    Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Managing Bank Account_3_14
+    Created DataObject: Cash Bank_Proses Managing Bank Account_3_18
+    Created Task: Cash Bank_Proses Managing Bank Account_3_6
+    Created Task: Cash Bank_Proses Managing Bank Account_3_7
+    Created Task: Cash Bank_Proses Managing Bank Account_3_10
+    Created Task: Cash Bank_Proses Managing Bank Account_3_21
+    Created StartEvent: Cash Bank_Proses Managing Bank Account_3_5
+    Created EndEvent: Cash Bank_Proses Managing Bank Account_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Account_3_13 and Cash Bank_Proses Managing Bank Account_3_14.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Account_3_18 and Cash Bank_Proses Managing Bank Account_3_19.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Managing Bank Management.xml at Level 3...
+    Found 6 elements, 11 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Managing Bank Management_3_15
+    Created DataObject: Cash Bank_Proses Managing Bank Management_3_19
+    Created DataObject: Cash Bank_Proses Managing Bank Management_3_26
+    Created Task: Cash Bank_Proses Managing Bank Management_3_6
+    Created Task: Cash Bank_Proses Managing Bank Management_3_7
+    Created Task: Cash Bank_Proses Managing Bank Management_3_11
+    Created Task: Cash Bank_Proses Managing Bank Management_3_22
+    Created StartEvent: Cash Bank_Proses Managing Bank Management_3_5
+    Created EndEvent: Cash Bank_Proses Managing Bank Management_3_21
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_14 and Cash Bank_Proses Managing Bank Management_3_15.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_19 and Cash Bank_Proses Managing Bank Management_3_20.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Bank Management_3_26 and Cash Bank_Proses Managing Bank Management_3_27.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Managing Cash Account.xml at Level 3...
+    Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Managing Cash Account_3_14
+    Created DataObject: Cash Bank_Proses Managing Cash Account_3_18
+    Created Task: Cash Bank_Proses Managing Cash Account_3_6
+    Created Task: Cash Bank_Proses Managing Cash Account_3_7
+    Created Task: Cash Bank_Proses Managing Cash Account_3_10
+    Created Task: Cash Bank_Proses Managing Cash Account_3_21
+    Created StartEvent: Cash Bank_Proses Managing Cash Account_3_5
+    Created EndEvent: Cash Bank_Proses Managing Cash Account_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Account_3_13 and Cash Bank_Proses Managing Cash Account_3_14.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Account_3_18 and Cash Bank_Proses Managing Cash Account_3_19.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Managing Cash Management.xml at Level 3...
+    Found 6 elements, 11 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Managing Cash Management_3_15
+    Created DataObject: Cash Bank_Proses Managing Cash Management_3_19
+    Created DataObject: Cash Bank_Proses Managing Cash Management_3_26
+    Created Task: Cash Bank_Proses Managing Cash Management_3_6
+    Created Task: Cash Bank_Proses Managing Cash Management_3_7
+    Created Task: Cash Bank_Proses Managing Cash Management_3_11
+    Created Task: Cash Bank_Proses Managing Cash Management_3_22
+    Created StartEvent: Cash Bank_Proses Managing Cash Management_3_5
+    Created EndEvent: Cash Bank_Proses Managing Cash Management_3_21
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_14 and Cash Bank_Proses Managing Cash Management_3_15.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_19 and Cash Bank_Proses Managing Cash Management_3_20.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Managing Cash Management_3_26 and Cash Bank_Proses Managing Cash Management_3_27.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Receiving Bank Receipt.xml at Level 3...
+    Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Receiving Bank Receipt_3_14
+    Created DataObject: Cash Bank_Proses Receiving Bank Receipt_3_18
+    Created Task: Cash Bank_Proses Receiving Bank Receipt_3_6
+    Created Task: Cash Bank_Proses Receiving Bank Receipt_3_7
+    Created Task: Cash Bank_Proses Receiving Bank Receipt_3_10
+    Created Task: Cash Bank_Proses Receiving Bank Receipt_3_21
+    Created StartEvent: Cash Bank_Proses Receiving Bank Receipt_3_5
+    Created EndEvent: Cash Bank_Proses Receiving Bank Receipt_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Bank Receipt_3_13 and Cash Bank_Proses Receiving Bank Receipt_3_14.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Bank Receipt_3_18 and Cash Bank_Proses Receiving Bank Receipt_3_19.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5', 'Cash Bank_Proses Receiving Bank Receipt_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21', 'Cash Bank_Proses Receiving Bank Receipt_3_20']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Receiving Cash Receipt.xml at Level 3...
+    Found 6 elements, 9 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Receiving Cash Receipt_3_14
+    Created DataObject: Cash Bank_Proses Receiving Cash Receipt_3_18
+    Created Task: Cash Bank_Proses Receiving Cash Receipt_3_6
+    Created Task: Cash Bank_Proses Receiving Cash Receipt_3_7
+    Created Task: Cash Bank_Proses Receiving Cash Receipt_3_10
+    Created Task: Cash Bank_Proses Receiving Cash Receipt_3_21
+    Created StartEvent: Cash Bank_Proses Receiving Cash Receipt_3_5
+    Created EndEvent: Cash Bank_Proses Receiving Cash Receipt_3_20
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Cash Receipt_3_13 and Cash Bank_Proses Receiving Cash Receipt_3_14.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Receiving Cash Receipt_3_18 and Cash Bank_Proses Receiving Cash Receipt_3_19.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5', 'Cash Bank_Proses Receiving Bank Receipt_3_5', 'Cash Bank_Proses Receiving Cash Receipt_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21', 'Cash Bank_Proses Receiving Bank Receipt_3_20', 'Cash Bank_Proses Receiving Cash Receipt_3_20']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Cash Bank Level 3 - Proses Updating Currency Records.xml at Level 3...
+    Found 7 elements, 12 flows, and 0 gateways
+    Created DataObject: Cash Bank_Proses Updating Currency Records_3_11
+    Created DataObject: Cash Bank_Proses Updating Currency Records_3_14
+    Created DataObject: Cash Bank_Proses Updating Currency Records_3_23
+    Created Task: Cash Bank_Proses Updating Currency Records_3_6
+    Created Task: Cash Bank_Proses Updating Currency Records_3_8
+    Created Task: Cash Bank_Proses Updating Currency Records_3_19
+    Created Task: Cash Bank_Proses Updating Currency Records_3_20
+    Created Task: Cash Bank_Proses Updating Currency Records_3_26
+    Created StartEvent: Cash Bank_Proses Updating Currency Records_3_5
+    Created EndEvent: Cash Bank_Proses Updating Currency Records_3_16
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_10 and Cash Bank_Proses Updating Currency Records_3_11.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_14 and Cash Bank_Proses Updating Currency Records_3_15.
+    Warning: Could not create relationship SEQUENCE_FLOW between Cash Bank_Proses Updating Currency Records_3_23 and Cash Bank_Proses Updating Currency Records_3_24.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5', 'Cash Bank_Proses Receiving Bank Receipt_3_5', 'Cash Bank_Proses Receiving Cash Receipt_3_5', 'Cash Bank_Proses Updating Currency Records_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21', 'Cash Bank_Proses Receiving Bank Receipt_3_20', 'Cash Bank_Proses Receiving Cash Receipt_3_20', 'Cash Bank_Proses Updating Currency Records_3_16']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Processing BPMN Level 0.xml at Level 0...
+    Found 16 elements, 50 flows, and 5 gateways
+    Created Task: ERP_0_22
+    Created Task: ERP_0_23
+    Created Task: ERP_0_28
+    Created Task: ERP_0_30
+    Created Task: ERP_0_32
+    Created Task: ERP_0_35
+    Created Task: ERP_0_40
+    Created Task: ERP_0_43
+    Created Task: ERP_0_44
+    Created Task: ERP_0_47
+    Created Task: ERP_0_54
+    Created Task: ERP_0_58
+    Created Task: ERP_0_61
+    Created Task: ERP_0_62
+    Created StartEvent: ERP_0_69
+    Created EndEvent: ERP_0_83
+    Warning: Could not create relationship SEQUENCE_FLOW between ERP_0_67 and ERP_0_32.
+    Warning: Could not create relationship SEQUENCE_FLOW between ERP_0_62 and ERP_0_67.
+    Warning: Could not create relationship SEQUENCE_FLOW between ERP_0_71 and invisible_task_ERP_0_36.
+    Warning: Could not create relationship SEQUENCE_FLOW between ERP_0_71 and invisible_task_ERP_0_48.
+    
+    Process integrity issues found:
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_starts': ['Account Payable_Creating the Purchase DP Invoice_3_4', 'Account Payable_Creating the Purchase Invoice_3_4', 'Account Payable_Finalizing Purchase DP Invoice Document_3_4', 'Account Payable_Finalizing Purchase Invoice Document_3_4', 'Account Payable_Reviewing Purchase DP Invoice_3_4', 'Account Payable_Reviewing Purchase Invoice_3_4', 'Account Payable_Updating Purchase DP Invoice Data_3_4', 'Account Payable_Updating Purchase Invoice Data_3_4']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_starts': ['Account Receivable_Creating the Sales DP Invoice_3_4', 'Account Receivable_Creating the Sales Invoice_3_4', 'Account Receivable_Finalizing Sales DP Invoice Document_3_4', 'Account Receivable_Finalizing Sales Invoice Document_3_4', 'Account Receivable_Reviewing Sales DP Invoice_3_4', 'Account Receivable_Reviewing Sales Invoice_3_4', 'Account Receivable_Updating Sales DP Invoice Data_3_4', 'Account Receivable_Updating Sales Invoice Data_3_4']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_starts': ['Asset Management_Asset Category Process_3_4', 'Asset Management_Asset Management Registration Process_3_4', 'Asset Management_Asset Transfer_3_3', 'Asset Management_Fiscal Type_3_3']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_starts': ['Cash Bank_Managing Currency Exchange_3_5', 'Cash Bank_Proses Disbursing Bank Payment_3_5', 'Cash Bank_Proses Disbursing Cash Payment_3_5', 'Cash Bank_Proses Managing Bank Account_3_5', 'Cash Bank_Proses Managing Bank Management_3_5', 'Cash Bank_Proses Managing Cash Account_3_5', 'Cash Bank_Proses Managing Cash Management_3_5', 'Cash Bank_Proses Receiving Bank Receipt_3_5', 'Cash Bank_Proses Receiving Cash Receipt_3_5', 'Cash Bank_Proses Updating Currency Records_3_5']}
+    
+    Check results:
+    {'level': 3, 'module': 'Account Payable', 'duplicate_ends': ['Account Payable_Creating the Purchase DP Invoice_3_35', 'Account Payable_Creating the Purchase Invoice_3_35', 'Account Payable_Finalizing Purchase DP Invoice Document_3_15', 'Account Payable_Finalizing Purchase Invoice Document_3_15', 'Account Payable_Reviewing Purchase DP Invoice_3_14', 'Account Payable_Reviewing Purchase Invoice_3_14', 'Account Payable_Updating Purchase DP Invoice Data_3_15', 'Account Payable_Updating Purchase Invoice Data_3_15']}
+    {'level': 3, 'module': 'Account Receivable', 'duplicate_ends': ['Account Receivable_Creating the Sales DP Invoice_3_35', 'Account Receivable_Creating the Sales Invoice_3_35', 'Account Receivable_Finalizing Sales DP Invoice Document_3_15', 'Account Receivable_Finalizing Sales Invoice Document_3_15', 'Account Receivable_Reviewing Sales DP Invoice_3_14', 'Account Receivable_Reviewing Sales Invoice_3_14', 'Account Receivable_Updating Sales DP Invoice Data_3_15', 'Account Receivable_Updating Sales Invoice Data_3_15']}
+    {'level': 3, 'module': 'Asset Management', 'duplicate_ends': ['Asset Management_Asset Category Process_3_11', 'Asset Management_Asset Management Registration Process_3_20', 'Asset Management_Asset Transfer_3_10', 'Asset Management_Fiscal Type_3_10']}
+    {'level': 3, 'module': 'Cash Bank', 'duplicate_ends': ['Cash Bank_Managing Currency Exchange_3_20', 'Cash Bank_Proses Disbursing Bank Payment_3_20', 'Cash Bank_Proses Disbursing Cash Payment_3_20', 'Cash Bank_Proses Managing Bank Account_3_20', 'Cash Bank_Proses Managing Bank Management_3_21', 'Cash Bank_Proses Managing Cash Account_3_20', 'Cash Bank_Proses Managing Cash Management_3_21', 'Cash Bank_Proses Receiving Bank Receipt_3_20', 'Cash Bank_Proses Receiving Cash Receipt_3_20', 'Cash Bank_Proses Updating Currency Records_3_16']}
+    
+    Check results:
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Creating the Purchase Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Payable_Reviewing Purchase Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_12', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_15', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_16', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_42', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_55', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_2_67', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales DP Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_19', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_22', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_23', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_51', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_54', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_56', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_58', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_62', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_66', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_2_97', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Category Process_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Asset Transfer_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Asset Management_Fiscal Type_3_20', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_13', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_27', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_40', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_70', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_86', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_88', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_109', 'split_count': 1}
+    {'invalid_split_gateway': 'invisible_task_Cash Bank_2_111', 'split_count': 1}
+    
+    Check results:
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Category Process_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Management Registration Process_3_33', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Asset Transfer_3_23', 'join_count': 1}
+    {'invalid_join_gateway': 'invisible_task_Asset Management_Fiscal Type_3_23', 'join_count': 1}
+    
+    Validating final BPMN structure...
+    
+    Validation issues found:
+    
+    Issue type: 
+            MATCH p=(n)-[r:XOR_SPLIT|OR_SPLIT]->(m)
+            WITH n, count(r) as outgoing
+            WHERE outgoing < 2
+            RETURN n.id as node_id, 'Invalid split pattern' as issue, outgoing
+            
     {'node_id': 'invisible_task_Account Payable_2_12', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Account Payable_2_15', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Account Payable_2_16', 'issue': 'Invalid split pattern', 'outgoing': 1}
@@ -3065,6 +5394,30 @@ if __name__ == "__main__":
     {'node_id': 'invisible_task_Account Receivable_Creating the Sales Invoice_3_11', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Account Receivable_Reviewing Sales DP Invoice_3_19', 'issue': 'Invalid split pattern', 'outgoing': 1}
     {'node_id': 'invisible_task_Account Receivable_Reviewing Sales Invoice_3_19', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_19', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_22', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_23', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_27', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_30', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_51', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_54', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_56', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_58', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_62', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_66', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_2_97', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_Asset Category Process_3_20', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_Asset Management Registration Process_3_30', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_Asset Transfer_3_20', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Asset Management_Fiscal Type_3_20', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Cash Bank_2_13', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Cash Bank_2_27', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Cash Bank_2_40', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Cash Bank_2_70', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Cash Bank_2_86', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Cash Bank_2_88', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Cash Bank_2_109', 'issue': 'Invalid split pattern', 'outgoing': 1}
+    {'node_id': 'invisible_task_Cash Bank_2_111', 'issue': 'Invalid split pattern', 'outgoing': 1}
     
     Issue type: 
             MATCH p=(n)-[r:XOR_JOIN|OR_JOIN]->(m)
@@ -3083,10 +5436,10 @@ if __name__ == "__main__":
             WHERE start_count > 1
             RETURN level, module, start_count, 'Multiple start events' as issue
             
+    {'level': 3, 'module': 'Account Payable', 'start_count': 8, 'issue': 'Multiple start events'}
     {'level': 3, 'module': 'Account Receivable', 'start_count': 8, 'issue': 'Multiple start events'}
     {'level': 3, 'module': 'Asset Management', 'start_count': 4, 'issue': 'Multiple start events'}
     {'level': 3, 'module': 'Cash Bank', 'start_count': 10, 'issue': 'Multiple start events'}
-    {'level': 3, 'module': 'Account Payable', 'start_count': 8, 'issue': 'Multiple start events'}
     
     Issue type: 
             MATCH (e:EndEvent)
@@ -3094,17 +5447,18 @@ if __name__ == "__main__":
             WHERE end_count > 1
             RETURN level, module, end_count, 'Multiple end events' as issue
             
+    {'level': 3, 'module': 'Account Payable', 'end_count': 8, 'issue': 'Multiple end events'}
     {'level': 3, 'module': 'Account Receivable', 'end_count': 8, 'issue': 'Multiple end events'}
     {'level': 3, 'module': 'Asset Management', 'end_count': 4, 'issue': 'Multiple end events'}
     {'level': 3, 'module': 'Cash Bank', 'end_count': 10, 'issue': 'Multiple end events'}
-    {'level': 3, 'module': 'Account Payable', 'end_count': 8, 'issue': 'Multiple end events'}
     Node counts by label:
     ['Task']: 328
+    ['DataObject']: 77
     ['StartEvent']: 39
     ['EndEvent']: 39
     
     Relationship counts by type:
-    SEQUENCE_FLOW: 270
+    SEQUENCE_FLOW: 350
     XOR_SPLIT: 67
     XOR_JOIN: 50
     
@@ -3112,7 +5466,7 @@ if __name__ == "__main__":
     Level 0: 20 nodes
     Level 1: 12 nodes
     Level 2: 151 nodes
-    Level 3: 223 nodes
+    Level 3: 300 nodes
     
 
 # 8. Visualize the Graph
@@ -3216,52 +5570,52 @@ graph_display
   <tbody>
     <tr>
       <th>0</th>
-      <td>Account Receivable_Updating Sales Invoice Data...</td>
-      <td>[StartEvent]</td>
-      <td>Start</td>
-      <td>#3CB371</td>
-      <td>3</td>
-      <td>Account Receivable</td>
-      <td>Updating Sales Invoice Data</td>
+      <td>Account Payable_2_64</td>
+      <td>[Task]</td>
+      <td>Validating Invoice Details</td>
+      <td>#FAFAD2</td>
+      <td>2</td>
+      <td>Account Payable</td>
+      <td>None</td>
     </tr>
     <tr>
       <th>1</th>
-      <td>Account Receivable_Updating Sales Invoice Data...</td>
-      <td>[EndEvent]</td>
-      <td>End</td>
-      <td>#DC143C</td>
-      <td>3</td>
-      <td>Account Receivable</td>
-      <td>Updating Sales Invoice Data</td>
+      <td>Account Payable_2_65</td>
+      <td>[Task]</td>
+      <td>Completing Purchase DP Invoice Form</td>
+      <td>#FAFAD2</td>
+      <td>2</td>
+      <td>Account Payable</td>
+      <td>None</td>
     </tr>
     <tr>
       <th>2</th>
-      <td>Asset Management_1_4</td>
+      <td>Account Payable_2_68</td>
       <td>[Task]</td>
-      <td>Asset Management</td>
-      <td>#FFFACD</td>
-      <td>1</td>
-      <td>Asset Management</td>
+      <td>Processing Purchase DP Return</td>
+      <td>#FAFAD2</td>
+      <td>2</td>
+      <td>Account Payable</td>
       <td>None</td>
     </tr>
     <tr>
       <th>3</th>
-      <td>Asset Management_1_3</td>
-      <td>[StartEvent]</td>
-      <td>St</td>
-      <td>#98FB98</td>
-      <td>1</td>
-      <td>Asset Management</td>
+      <td>Account Payable_2_72</td>
+      <td>[Task]</td>
+      <td>Creating the Purchase DP Invoice</td>
+      <td>#FAFAD2</td>
+      <td>2</td>
+      <td>Account Payable</td>
       <td>None</td>
     </tr>
     <tr>
       <th>4</th>
-      <td>Asset Management_1_6</td>
-      <td>[EndEvent]</td>
-      <td>EndEvent</td>
-      <td>#FF4500</td>
-      <td>1</td>
-      <td>Asset Management</td>
+      <td>Account Payable_2_76</td>
+      <td>[Task]</td>
+      <td>Validating Invoice DP Details</td>
+      <td>#FAFAD2</td>
+      <td>2</td>
+      <td>Account Payable</td>
       <td>None</td>
     </tr>
   </tbody>
@@ -3305,57 +5659,57 @@ graph_display
   <tbody>
     <tr>
       <th>0</th>
-      <td>Account Receivable_Updating Sales Invoice Data...</td>
+      <td>Account Payable_2_63</td>
       <td>SEQUENCE_FLOW</td>
-      <td>Account Receivable_Updating Sales Invoice Data...</td>
-      <td>Account Receivable_Updating Sales Invoice Data...</td>
+      <td>Account Payable_2_64</td>
+      <td>Account Payable_2_43</td>
       <td>#A9A9A9</td>
-      <td>3.0</td>
-      <td>Account Receivable</td>
-      <td>Updating Sales Invoice Data</td>
+      <td>2.0</td>
+      <td>Account Payable</td>
+      <td>None</td>
     </tr>
     <tr>
       <th>1</th>
-      <td>Asset Management_1_7</td>
+      <td>Account Payable_2_5</td>
       <td>SEQUENCE_FLOW</td>
-      <td>Asset Management_1_4</td>
-      <td>Asset Management_1_6</td>
+      <td>Account Payable_2_65</td>
+      <td>Account Payable_2_31</td>
       <td>#A9A9A9</td>
-      <td>1.0</td>
-      <td>Asset Management</td>
+      <td>2.0</td>
+      <td>Account Payable</td>
       <td>None</td>
     </tr>
     <tr>
       <th>2</th>
-      <td>Asset Management_1_5</td>
+      <td>Account Payable_2_6</td>
       <td>SEQUENCE_FLOW</td>
-      <td>Asset Management_1_3</td>
-      <td>Asset Management_1_4</td>
+      <td>Account Payable_2_68</td>
+      <td>Account Payable_2_30</td>
       <td>#A9A9A9</td>
-      <td>1.0</td>
-      <td>Asset Management</td>
+      <td>2.0</td>
+      <td>Account Payable</td>
       <td>None</td>
     </tr>
     <tr>
       <th>3</th>
-      <td>Asset Management_2_42</td>
+      <td>Account Payable_2_71</td>
       <td>SEQUENCE_FLOW</td>
-      <td>Asset Management_2_34</td>
-      <td>Asset Management_2_41</td>
+      <td>Account Payable_2_72</td>
+      <td>Account Payable_2_76</td>
       <td>#A9A9A9</td>
       <td>2.0</td>
-      <td>Asset Management</td>
+      <td>Account Payable</td>
       <td>None</td>
     </tr>
     <tr>
       <th>4</th>
-      <td>Asset Management_2_43</td>
+      <td>Account Payable_2_79</td>
       <td>SEQUENCE_FLOW</td>
-      <td>Asset Management_2_35</td>
-      <td>Asset Management_2_41</td>
+      <td>Account Payable_2_76</td>
+      <td>Account Payable_2_65</td>
       <td>#A9A9A9</td>
       <td>2.0</td>
-      <td>Asset Management</td>
+      <td>Account Payable</td>
       <td>None</td>
     </tr>
   </tbody>
@@ -3568,18 +5922,60 @@ def evaluate_service_metrics():
     def calculate_modularity(session, module):
         """
         **Modularity (MOD)**
-        Since each module is considered as a community, we can assume modularity as 1
+        MOD = (Number of intra-module edges - Expected number of intra-module edges) / Total number of edges
         """
-        modularity = 1
+        # Calculate intra-module edges
+        query_intra = """
+        MATCH (n)-[r]->(m)
+        WHERE n.module = $module AND m.module = $module
+        RETURN count(r) AS E_intra
+        """
+        E_intra = session.run(query_intra, module=module).single()["E_intra"]
+        
+        # Calculate total edges
+        query_total = """
+        MATCH ()-[r]->()
+        RETURN count(r) AS E_total
+        """
+        E_total = session.run(query_total).single()["E_total"]
+        
+        # Calculate expected intra-module edges
+        query_nodes = """
+        MATCH (n)
+        WHERE n.module = $module
+        RETURN count(n) AS N_module
+        """
+        N_module = session.run(query_nodes, module=module).single()["N_module"]
+        
+        query_all_nodes = """
+        MATCH (n)
+        RETURN count(n) AS N_total
+        """
+        N_total = session.run(query_all_nodes).single()["N_total"]
+        
+        p = N_module / N_total if N_total > 0 else 0
+        E_expected = p * E_total
+        modularity = (E_intra - E_expected) / E_total if E_total > 0 else 0
         return modularity
     
     def calculate_average_path_length(session, module):
         """
         **Average Path Length (APL)**
-        Requires computation of shortest paths between all pairs of nodes
+        Average shortest path length between all pairs of nodes in the service
         """
-        # Placeholder value due to computational complexity
-        avg_path_length = 1  # Adjust based on actual data
+        query = """
+        MATCH (n)
+        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)
+        WITH collect(n) AS nodes
+        UNWIND nodes AS n1
+        UNWIND nodes AS n2
+        WHERE elementId(n1) < elementId(n2)
+        OPTIONAL MATCH p=shortestPath((n1)-[*]-(n2))
+        WHERE length(p) > 0
+        RETURN avg(length(p)) AS avg_path_length
+        """
+        result = session.run(query, module=module).single()
+        avg_path_length = result["avg_path_length"] if result and result["avg_path_length"] is not None else 0
         return avg_path_length
     
     def calculate_graph_density(session, module):
@@ -3607,10 +6003,26 @@ def evaluate_service_metrics():
     def calculate_clustering_coefficient(session, module):
         """
         **Clustering Coefficient (CC)**
-        CC = Average of local clustering coefficients of all nodes
+        Average of local clustering coefficients of all nodes
         """
-        # Placeholder value; requires GDS library for accurate calculation
-        clustering_coefficient = 0.5  # Adjust based on actual data
+        query = """
+        MATCH (n)
+        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)
+        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)
+        WITH n, collect(DISTINCT m) AS neighbors
+        UNWIND neighbors AS n1
+        UNWIND neighbors AS n2
+        WITH n, neighbors, n1, n2
+        WHERE elementId(n1) < elementId(n2)
+        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)
+        WITH n, neighbors, count(n2) AS neighbor_links
+        WITH n, size(neighbors) AS k, neighbor_links
+        WHERE k > 1
+        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering
+        RETURN avg(clustering) AS clustering_coefficient
+        """
+        result = session.run(query, module=module).single()
+        clustering_coefficient = result["clustering_coefficient"] if result and result["clustering_coefficient"] is not None else 0
         return clustering_coefficient
     
     def calculate_degree_centrality(session, module):
@@ -3621,11 +6033,12 @@ def evaluate_service_metrics():
         query = """
         MATCH (n)
         WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)
-        WITH n, size((n)--()) AS degree
+        OPTIONAL MATCH (n)-[r]-()
+        WITH n, count(r) AS degree
         RETURN avg(degree) AS avg_degree
         """
         result = session.run(query, module=module).single()
-        avg_degree = result["avg_degree"] if result else 0
+        avg_degree = result["avg_degree"] if result and result["avg_degree"] is not None else 0
         return avg_degree
     
     def calculate_betweenness_centrality(session, module):
@@ -3675,9 +6088,15 @@ def evaluate_service_metrics():
     def calculate_scalability(session, module):
         """
         **Scalability (S)**
-        S = Ability to handle increased load (Placeholder value)
+        S = 1 / (Number of nodes)
         """
-        scalability = 1  # Adjust based on actual data
+        query = """
+        MATCH (n)
+        WHERE n.module = $module
+        RETURN count(n) AS N
+        """
+        N = session.run(query, module=module).single()["N"]
+        scalability = 1 / N if N > 0 else 0
         return scalability
     
     def calculate_maintainability(session, module):
@@ -3780,62 +6199,62 @@ evaluation_results = run_evaluation()
 
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 46, offset: 46} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
+    
+
+    Error calculating average_path_length for Account Payable: {code: Neo.ClientError.Statement.SyntaxError} {message: Invalid input 'WHERE': expected 'FOREACH', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'MATCH', 'MERGE', 'NODETACH', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 7, column 9 (offset: 196))
+    "        WHERE elementId(n1) < elementId(n2)"
+             ^}
+    
+
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 4, column: 80, offset: 180} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 10, column: 81, offset: 459} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 46, offset: 46} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 4, column: 80, offset: 180} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 10, column: 81, offset: 459} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 46, offset: 46} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 4, column: 80, offset: 180} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 10, column: 81, offset: 459} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
-    
-
-    Error calculating degree_centrality for Account Payable: {code: Neo.ClientError.Statement.SyntaxError} {message: A pattern expression should only be used in order to test the existence of a pattern. It can no longer be used inside the function size(), an alternative is to replace size() with COUNT {}. (line 4, column 22 (offset: 122))
-    "        WITH n, size((n)--()) AS degree"
-                          ^}
-    Error calculating degree_centrality for Account Receivable: {code: Neo.ClientError.Statement.SyntaxError} {message: A pattern expression should only be used in order to test the existence of a pattern. It can no longer be used inside the function size(), an alternative is to replace size() with COUNT {}. (line 4, column 22 (offset: 122))
-    "        WITH n, size((n)--()) AS degree"
-                          ^}
-    Error calculating degree_centrality for Asset Management: {code: Neo.ClientError.Statement.SyntaxError} {message: A pattern expression should only be used in order to test the existence of a pattern. It can no longer be used inside the function size(), an alternative is to replace size() with COUNT {}. (line 4, column 22 (offset: 122))
-    "        WITH n, size((n)--()) AS degree"
-                          ^}
-    
-
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 46, offset: 46} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
+    
+
+    Error calculating average_path_length for Account Receivable: {code: Neo.ClientError.Statement.SyntaxError} {message: Invalid input 'WHERE': expected 'FOREACH', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'MATCH', 'MERGE', 'NODETACH', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 7, column 9 (offset: 196))
+    "        WHERE elementId(n1) < elementId(n2)"
+             ^}
+    Error calculating average_path_length for Asset Management: {code: Neo.ClientError.Statement.SyntaxError} {message: Invalid input 'WHERE': expected 'FOREACH', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'MATCH', 'MERGE', 'NODETACH', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 7, column 9 (offset: 196))
+    "        WHERE elementId(n1) < elementId(n2)"
+             ^}
+    Error calculating average_path_length for Cash Bank: {code: Neo.ClientError.Statement.SyntaxError} {message: Invalid input 'WHERE': expected 'FOREACH', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'MATCH', 'MERGE', 'NODETACH', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 7, column 9 (offset: 196))
+    "        WHERE elementId(n1) < elementId(n2)"
+             ^}
+    
+
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 4, column: 80, offset: 180} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 10, column: 81, offset: 459} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
-    
-
-    Error calculating degree_centrality for Cash Bank: {code: Neo.ClientError.Statement.SyntaxError} {message: A pattern expression should only be used in order to test the existence of a pattern. It can no longer be used inside the function size(), an alternative is to replace size() with COUNT {}. (line 4, column 22 (offset: 122))
-    "        WITH n, size((n)--()) AS degree"
-                          ^}
-    
-
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 46, offset: 46} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)<-[:USES]-(m)\n        WHERE n.module = $module AND m.module = $module AND n.id <> m.id\n        RETURN count(DISTINCT d) AS SharedData\n        '
     Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 2, column: 21, offset: 21} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
-    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownLabelWarning} {category: UNRECOGNIZED} {title: The provided label is not in the database.} {description: One of the labels in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing label name is: DataObject)} {position: line: 2, column: 31, offset: 31} for query: '\n        MATCH (n)-[:USES]->(d:DataObject)\n        WHERE n.module = $module\n        RETURN count(DISTINCT d) AS TotalData\n        '
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 4, column: 80, offset: 180} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
+    Received notification from DBMS server: {severity: WARNING} {code: Neo.ClientNotification.Statement.UnknownRelationshipTypeWarning} {category: UNRECOGNIZED} {title: The provided relationship type is not in the database.} {description: One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: USES)} {position: line: 10, column: 81, offset: 459} for query: '\n        MATCH (n)\n        WHERE n.module = $module AND (n.invisible IS NULL OR n.invisible = False)\n        OPTIONAL MATCH (n)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(m)\n        WITH n, collect(DISTINCT m) AS neighbors\n        UNWIND neighbors AS n1\n        UNWIND neighbors AS n2\n        WITH n, neighbors, n1, n2\n        WHERE elementId(n1) < elementId(n2)\n        OPTIONAL MATCH (n1)-[:SEQUENCE_FLOW|XOR_SPLIT|XOR_JOIN|OR_SPLIT|OR_JOIN|USES]-(n2)\n        WITH n, neighbors, count(n2) AS neighbor_links\n        WITH n, size(neighbors) AS k, neighbor_links\n        WHERE k > 1\n        WITH (2.0 * neighbor_links) / (k * (k - 1)) AS clustering\n        RETURN avg(clustering) AS clustering_coefficient\n        '
     
 
-    Error calculating degree_centrality for ERP: {code: Neo.ClientError.Statement.SyntaxError} {message: A pattern expression should only be used in order to test the existence of a pattern. It can no longer be used inside the function size(), an alternative is to replace size() with COUNT {}. (line 4, column 22 (offset: 122))
-    "        WITH n, size((n)--()) AS degree"
-                          ^}
+    Error calculating average_path_length for ERP: {code: Neo.ClientError.Statement.SyntaxError} {message: Invalid input 'WHERE': expected 'FOREACH', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'MATCH', 'MERGE', 'NODETACH', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 7, column 9 (offset: 196))
+    "        WHERE elementId(n1) < elementId(n2)"
+             ^}
     
     Service Metrics Evaluation Results:
     ================================================================================
                         service_cohesion  service_coupling  service_granularity  \
-    Account Payable                0.020               0.0                  1.0   
-    Account Receivable             0.020               0.0                  1.0   
-    Asset Management               0.020               0.0                  1.0   
-    Cash Bank                      0.016               0.0                  1.0   
+    Account Payable                0.017               0.0                  1.0   
+    Account Receivable             0.017               0.0                  1.0   
+    Asset Management               0.017               0.0                  1.0   
+    Cash Bank                      0.013               0.0                  1.0   
     ERP                            0.221               0.0                  1.0   
     
                         service_autonomy  service_complexity  data_cohesion  \
@@ -3846,25 +6265,25 @@ evaluation_results = run_evaluation()
     ERP                              1.0                  17              0   
     
                         interface_count  stability  modularity  \
-    Account Payable                   0          0           1   
-    Account Receivable                0          0           1   
-    Asset Management                  0          0           1   
-    Cash Bank                         0          0           1   
-    ERP                               0          0           1   
+    Account Payable                   0          0      -0.018   
+    Account Receivable                0          0      -0.018   
+    Asset Management                  0          0       0.008   
+    Cash Bank                         0          0      -0.020   
+    ERP                               0          0       0.049   
     
                         average_path_length  graph_density  \
-    Account Payable                       1          0.020   
-    Account Receivable                    1          0.020   
-    Asset Management                      1          0.020   
-    Cash Bank                             1          0.016   
-    ERP                                   1          0.221   
+    Account Payable                     0.0          0.017   
+    Account Receivable                  0.0          0.017   
+    Asset Management                    0.0          0.017   
+    Cash Bank                           0.0          0.013   
+    ERP                                 0.0          0.221   
     
                         clustering_coefficient  degree_centrality  \
-    Account Payable                        0.5                0.0   
-    Account Receivable                     0.5                0.0   
-    Asset Management                       0.5                0.0   
-    Cash Bank                              0.5                0.0   
-    ERP                                    0.5                0.0   
+    Account Payable                        1.0              1.744   
+    Account Receivable                     1.0              1.744   
+    Asset Management                       1.0              2.034   
+    Cash Bank                              1.0              1.779   
+    ERP                                    1.0              3.625   
     
                         betweenness_centrality  number_of_connected_components  \
     Account Payable                        0.5                               1   
@@ -3874,11 +6293,11 @@ evaluation_results = run_evaluation()
     ERP                                    0.5                               1   
     
                         latency  throughput  fault_tolerance  scalability  \
-    Account Payable           1           1                1            1   
-    Account Receivable        1           1                1            1   
-    Asset Management          1           1                1            1   
-    Cash Bank                 1           1                1            1   
-    ERP                       1           1                1            1   
+    Account Payable           1           1                1        0.010   
+    Account Receivable        1           1                1        0.010   
+    Asset Management          1           1                1        0.009   
+    Cash Bank                 1           1                1        0.007   
+    ERP                       1           1                1        0.050   
     
                         maintainability  
     Account Payable               1.000  
@@ -3950,9 +6369,13 @@ class TraditionalMicroservicesEvaluator:
             
     def parse_bpmn_file(self, file_path):
         """Parse a single BPMN XML file and extract elements in mxGraph format"""
+        import re
+        import xml.etree.ElementTree as ET
+        import html
+    
         tree = ET.parse(file_path)
         root = tree.getroot()
-        
+    
         # Extract module and activity from filename
         filename = os.path.basename(file_path)
         match = re.match(r'BPMN\s+(.+?)\s+Level\s+(\d+)(?:\s+-\s+(.+))?\.xml', filename)
@@ -3962,7 +6385,7 @@ class TraditionalMicroservicesEvaluator:
             activity = match.group(3).strip() if match.group(3) else None
         else:
             module = "Unknown"
-        
+    
         if module not in self.services:
             self.services[module] = {
                 'tasks': [],
@@ -3970,9 +6393,9 @@ class TraditionalMicroservicesEvaluator:
                 'data_objects': set(),
                 'external_dependencies': set(),
             }
-        
+    
         process_root = root.find('.//root') if root.find('.//root') is not None else root
-        
+    
         for cell in process_root.findall('.//mxCell'):
             cell_id = cell.get('id')
             if not cell_id or cell_id in ['0', '1']:  # Skip container cells
@@ -3992,11 +6415,41 @@ class TraditionalMicroservicesEvaluator:
                 elif 'shape=mxgraph.bpmn.event' in style:
                     # Events can be considered as tasks or external dependencies
                     pass
+                elif 'shape=mxgraph.bpmn.data' in style:
+                    self.services[module]['data_objects'].add(cell_id)
+    
             elif edge == '1':  # Handle edges/flows
                 source = cell.get('source')
                 target = cell.get('target')
                 if source and target:
                     self.services[module]['edges'].append((source, target))
+    
+                    # Check for external dependencies
+                    source_module = self.find_module_by_cell_id(source)
+                    target_module = self.find_module_by_cell_id(target)
+                    if source_module != module or target_module != module:
+                        self.services[module]['external_dependencies'].add((source, target))
+    
+        # Additional parsing for associations (if any)
+        for elem in root.iter():
+            tag = elem.tag.lower()
+            if 'association' in tag:
+                source_ref = elem.get('sourceRef')
+                target_ref = elem.get('targetRef')
+                if source_ref and target_ref:
+                    self.services[module]['edges'].append((source_ref, target_ref))
+    
+                    # Check for external dependencies in associations
+                    source_module = self.find_module_by_cell_id(source_ref)
+                    target_module = self.find_module_by_cell_id(target_ref)
+                    if source_module != module or target_module != module:
+                        self.services[module]['external_dependencies'].add((source_ref, target_ref))
+    
+    def find_module_by_cell_id(self, cell_id):
+        for mod, data in self.services.items():
+            if cell_id in data['tasks'] or cell_id in data['data_objects']:
+                return mod
+        return None
     
     def evaluate_metrics(self):
         """Calculate metrics for traditional method"""
@@ -4012,7 +6465,7 @@ class TraditionalMicroservicesEvaluator:
             
             # Service Coupling
             external_edges = len(data['external_dependencies'])
-            total_edges = E + external_edges
+            total_edges = E
             coupling = external_edges / total_edges if total_edges > 0 else 0
             
             # Service Complexity
@@ -4042,6 +6495,21 @@ class TraditionalMicroservicesEvaluator:
             Ca = 0  # Simplified assumption
             stability = Ce / (Ca + Ce) if (Ca + Ce) > 0 else 0
             
+            # Average Path Length (Approximate)
+            avg_path_length = 1  # Placeholder or calculate based on data
+            
+            # Clustering Coefficient (Approximate)
+            clustering_coefficient = 0.5  # Placeholder or calculate based on data
+            
+            # Degree Centrality
+            degree_centrality = (2 * E) / N if N > 0 else 0
+            
+            # Modularity (Assumed)
+            modularity = 1  # Adjust if necessary
+            
+            # Scalability
+            scalability = 1 / N if N > 0 else 0
+            
             metrics[module] = {
                 'service_cohesion': cohesion,
                 'service_coupling': coupling,
@@ -4051,18 +6519,17 @@ class TraditionalMicroservicesEvaluator:
                 'data_cohesion': data_cohesion,
                 'interface_count': interface_count,
                 'stability': stability,
-                # Placeholder values for additional metrics
-                'modularity': 1,
-                'average_path_length': 1,
+                'modularity': modularity,
+                'average_path_length': avg_path_length,
                 'graph_density': cohesion,  # As an approximation
-                'clustering_coefficient': 0.5,
-                'degree_centrality': E / N if N > 0 else 0,
-                'betweenness_centrality': 0.5,
+                'clustering_coefficient': clustering_coefficient,
+                'degree_centrality': degree_centrality,
+                'betweenness_centrality': 0.5,  # Placeholder
                 'number_of_connected_components': P,
                 'latency': 1,
                 'throughput': 1,
                 'fault_tolerance': 1,
-                'scalability': 1,
+                'scalability': scalability,
                 'maintainability': 1 / complexity if complexity > 0 else 0
             }
         
@@ -4109,7 +6576,7 @@ def compare_approaches(traditional_df, graph_df):
             max_value = df[col].max()
             min_value = df[col].min()
             if max_value == min_value:
-                df_norm[col] = float('nan')  # Set to NaN if all values are the same
+                df_norm[col] = 0.5
             else:
                 df_norm[col] = (df[col] - min_value) / (max_value - min_value)
         return df_norm
@@ -4233,23 +6700,24 @@ comparison_results = run_comparative_analysis(traditional_results, evaluation_re
     Comparison of Traditional vs Graph-based Approaches:
     ================================================================================
                         Traditional  Graph-based Better Method
-    Account Payable        0.271007     0.509756   Graph-based
-    Account Receivable     0.271007     0.509756   Graph-based
-    Asset Management       0.150801     0.509756   Graph-based
-    Cash Bank              0.250595     0.500000   Graph-based
-    ERP                         NaN     0.500000         Equal
-    Unknown                0.800000          NaN         Equal
+    Account Payable        0.514199     0.481861   Traditional
+    Account Receivable     0.476369     0.481861   Graph-based
+    Asset Management       0.397484     0.491830   Graph-based
+    Cash Bank              0.472130     0.474070   Graph-based
+    ERP                         NaN     0.525000         Equal
+    Unknown                0.550000          NaN         Equal
     
     Key Findings:
     --------------------------------------------------------------------------------
     
     Number of Modules where each method performs better:
-    Graph-based: 4
+    Graph-based: 3
     Equal: 2
+    Traditional: 1
     
-    Average Traditional Score: 0.349
-    Average Graph-based Score: 0.506
-    Overall Improvement: 45.08%
+    Average Traditional Score: 0.482
+    Average Graph-based Score: 0.491
+    Overall Improvement: 1.84%
     
 
 
@@ -4262,4 +6730,193 @@ comparison_results = run_comparative_analysis(traditional_results, evaluation_re
     
 ![png](index_files/index_37_2.png)
     
+
+
+
+```python
+def create_comparison_table(traditional_df, graph_df):
+    """Create a table comparing the metrics of both methods"""
+    combined_df = traditional_df.join(graph_df, lsuffix='_Traditional', rsuffix='_Graph')
+    # Reorder columns for better readability
+    cols = []
+    for col in traditional_df.columns:
+        cols.append(f"{col}_Traditional")
+        if col in graph_df.columns:
+            cols.append(f"{col}_Graph")
+    combined_df = combined_df[cols]
+    return combined_df
+
+# Generate comparison table
+comparison_table = create_comparison_table(traditional_results, evaluation_results)
+display(comparison_table)
+
+```
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>service_cohesion_Traditional</th>
+      <th>service_cohesion_Graph</th>
+      <th>service_coupling_Traditional</th>
+      <th>service_coupling_Graph</th>
+      <th>service_granularity_Traditional</th>
+      <th>service_granularity_Graph</th>
+      <th>service_autonomy_Traditional</th>
+      <th>service_autonomy_Graph</th>
+      <th>service_complexity_Traditional</th>
+      <th>service_complexity_Graph</th>
+      <th>...</th>
+      <th>latency_Traditional</th>
+      <th>latency_Graph</th>
+      <th>throughput_Traditional</th>
+      <th>throughput_Graph</th>
+      <th>fault_tolerance_Traditional</th>
+      <th>fault_tolerance_Graph</th>
+      <th>scalability_Traditional</th>
+      <th>scalability_Graph</th>
+      <th>maintainability_Traditional</th>
+      <th>maintainability_Graph</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>Account Payable</th>
+      <td>0.099</td>
+      <td>0.017</td>
+      <td>0.443</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>-0.115</td>
+      <td>1.0</td>
+      <td>81</td>
+      <td>1.0</td>
+      <td>...</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>0.019</td>
+      <td>0.010</td>
+      <td>0.012</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>Account Receivable</th>
+      <td>0.099</td>
+      <td>0.017</td>
+      <td>0.588</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>-0.481</td>
+      <td>1.0</td>
+      <td>81</td>
+      <td>1.0</td>
+      <td>...</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>0.019</td>
+      <td>0.010</td>
+      <td>0.012</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>Asset Management</th>
+      <td>0.098</td>
+      <td>0.017</td>
+      <td>0.705</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>-0.930</td>
+      <td>1.0</td>
+      <td>101</td>
+      <td>1.0</td>
+      <td>...</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>0.018</td>
+      <td>0.009</td>
+      <td>0.010</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>Cash Bank</th>
+      <td>0.058</td>
+      <td>0.013</td>
+      <td>0.531</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>-0.147</td>
+      <td>1.0</td>
+      <td>89</td>
+      <td>1.0</td>
+      <td>...</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>1</td>
+      <td>1.0</td>
+      <td>0.013</td>
+      <td>0.007</td>
+      <td>0.011</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>Unknown</th>
+      <td>0.549</td>
+      <td>NaN</td>
+      <td>0.940</td>
+      <td>NaN</td>
+      <td>1.0</td>
+      <td>NaN</td>
+      <td>-2.357</td>
+      <td>NaN</td>
+      <td>38</td>
+      <td>NaN</td>
+      <td>...</td>
+      <td>1</td>
+      <td>NaN</td>
+      <td>1</td>
+      <td>NaN</td>
+      <td>1</td>
+      <td>NaN</td>
+      <td>0.071</td>
+      <td>NaN</td>
+      <td>0.026</td>
+      <td>NaN</td>
+    </tr>
+  </tbody>
+</table>
+<p>5 rows × 40 columns</p>
+</div>
 
