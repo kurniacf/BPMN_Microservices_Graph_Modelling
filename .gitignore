@@ -1,5 +1,5 @@
 # Ignore all .xml files in the assets folder
-/assets/*.xml
+# /assets/*.xml
 
 # If you want to ignore the entire assets folder, use this instead:
 # /assets/
